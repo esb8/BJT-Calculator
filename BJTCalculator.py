@@ -1,18 +1,73 @@
-import numpy as np
-import PySpice.Logging.Logging as Logging
-from PySpice.Spice.Netlist import Circuit
-from PySpice.Unit import *
-# Program to Handle BJT Calculations and Biasing
-#
+mA = 1e-3  # define milliampere
 
-cir = Circuit('Common Emitter Amplifier')
-Vbase = cir.V('Vbase', 'Rb1', cir.gnd, 12@u_V)
-Vcc = cir.V('Vcc', 'collector', cir.gnd, 12@u_V)
-Rc = cir.R('Rc', 'collector', 'Vcc', 1@u_kOhm)
-Re = cir.R('Re', 'emitter', cir.gnd, 500@u_Ohm)
-Rb1 = cir.R('Rb1', 'Vbase', 'base', 100@u_kOhm)
-Rb2 = cir.R('Rb2', 'base', cir.gnd, 20@u_kOhm)
-Q1 = cir.BJT('Q1', 'collector', 'base', 'emitter', model='2N2222')
-Q1.model('2N2222', 'NPN', bf=100, va=100@u_V)
-simulator = cir.simulator(temperature=25, nominal_temperature=25)
-analysis = simulator.dc(Vbase=slice(0, 12, 0.1))
+class BJTCalculator:
+    def __init__(self, Vdd=12, Ic=None, Ib=None, Vbe=0.7, Re=100, Rc=1e3):
+        # Store what the user gave us
+        self.Vdd = Vdd
+        self.Ic = Ic
+        self.Ib = Ib
+        self.Vbe = Vbe
+        self.Re = Re
+        self.Rc = Rc
+        self.Vce_min = 0.2  # Minimum Vce for saturation
+        self.Vb = None  # Base voltage, to be calculated if needed
+        self.R1 = None  # Base resistor 1, to be calculated if needed
+        self.R2 = None  # Base resistor 2 (to gnd), to be calculated if needed
+        
+        # Placeholders for calculated values
+        self.Ie = None
+        self.Ve = None
+        self.Vc = None
+        self.Vce = None
+        self.Vc_min_overhead = None
+        self.Vc_max_overhead = None
+
+
+    def calculate_vb(self):
+        self.Vdd * self.R2 / (self.R1 + self.R2) 
+        return self.Vb
+    
+    def calculate_ib(self):
+        self.Ib = (self.Vb / ((self.R1)^-1 + (self.R2)^-1)^-1) 
+        return self.Ib, self.Req
+
+    def calculate_ie(self):
+        self.Ie = self.Ic + self.Ib
+        return self.Ie
+    
+    def calculate_ve(self):
+        if self.Ie is None:
+            self.calculate_ie()
+        self.Ve = self.Ie * self.Re
+        return self.Ve
+    
+    def calculate_vc(self):
+        self.Vc = self.Vdd - (self.Ic * self.Rc)
+        return self.Vc
+    
+    def calculate_vce(self):
+        if self.Vc is None:
+            self.calculate_vc()
+        if self.Ve is None:
+            self.calculate_ve()
+        self.Vce = self.Vc - self.Ve
+        return self.Vce
+    
+    def calculate_overhead(self):
+        Vc_min_overhead = self.Vdd - self.Vc
+        Vc_max_overhead = self.Vce_min - self.Ve
+        return self.Vc_min_overhead, self.Vc_max_overhead
+    
+    def find_bias(self):
+        if self.Ic is not None:
+            raise ValueError("Please provide either Ic or Ib, not both.")
+        self.Ie = self.Ic
+        self.calculate_ve()
+        self.calculate_vc()
+        self.calculate_vce()
+        self.optimize_bias()
+        # condition
+        abs(abs(self.Vcc - self.Vc) - abs(self.Vce - self.Ve)) <=1.0  # Check if the bias is optimized within 1V tolerance
+        # this doesn't work because the bias is not optimized, we need to adjust R1 and R2 to achieve the desired bias point. 
+        # therefore affecting the value, 
+        return self.ve
