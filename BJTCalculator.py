@@ -1,11 +1,5 @@
 import math
 
-# ============================================================
-# PRIORITY SYSTEM (CONFLICT RESOLUTION)
-# ============================================================
-# Higher number = stronger (wins conflicts)
-
-
 
 def getv(known, key):
     """Read a value from `known` (no priority/meta wrapper).
@@ -424,38 +418,86 @@ RULES += [
 # 8) BANDWIDTH / POLES (OPTIONAL) (derived)
 # ------------------------------------------------------------
 
+
 RULES += [
-    {"needs": {"Rc_ac", "C_out_total", "is_forward_active"}, "produces": "wH_out",
-     "cond": lambda k: bool(getv(k, "is_forward_active")) and (getv(k, "C_out_total") > 0),
-     "source": "bandwidth",
-     "fn": lambda k: 1.0 / (getv(k, "Rc_ac") * getv(k, "C_out_total"))},
 
-    {"needs": {"wH_out"}, "produces": "fH_out", "source": "bandwidth",
-     "fn": lambda k: getv(k, "wH_out") / (2.0 * math.pi)},
-
-    {"needs": {"rpi", "beta", "Re_ac", "is_forward_active"}, "produces": "Rin_base",
+    # Miller capacitance
+    {"needs": {"C_mu", "Av_mid", "is_forward_active"}, "produces": "C_miller",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "bandwidth",
-     "fn": lambda k: getv(k, "rpi") + (getv(k, "beta") + 1.0) * getv(k, "Re_ac")},
+     "fn": lambda k: getv(k, "C_mu") * (1.0 - getv(k, "Av_mid"))},
 
-    {"needs": {"Rin_base", "Req", "is_forward_active"}, "produces": "Rin_total",
-     "cond": lambda k: bool(getv(k, "is_forward_active")),
+    # Total input HF capacitance
+    {"needs": {"C_pi", "C_miller", "C_stray_in"}, "produces": "C_in_hf",
      "source": "bandwidth",
-     "fn": lambda k: (getv(k, "Rin_base") * getv(k, "Req")) / (getv(k, "Rin_base") + getv(k, "Req"))},
+     "fn": lambda k: getv(k, "C_pi") + getv(k, "C_miller") + getv(k, "C_stray_in")},
 
-    {"needs": {"Rin_total", "C_in_total", "is_forward_active"}, "produces": "wH_in",
-     "cond": lambda k: bool(getv(k, "is_forward_active")) and (getv(k, "C_in_total") > 0),
+    # Input HF pole
+    {"needs": {"Rin_total", "C_in_hf"}, "produces": "wH_in",
+     "cond": lambda k: getv(k, "C_in_hf") > 0,
      "source": "bandwidth",
-     "fn": lambda k: 1.0 / (getv(k, "Rin_total") * getv(k, "C_in_total"))},
+     "fn": lambda k: 1.0 / (getv(k, "Rin_total") * getv(k, "C_in_hf"))},
 
-    {"needs": {"wH_in"}, "produces": "fH_in", "source": "bandwidth",
+    {"needs": {"wH_in"}, "produces": "fH_in",
+     "source": "bandwidth",
      "fn": lambda k: getv(k, "wH_in") / (2.0 * math.pi)},
 
-    {"needs": {"fH_in", "fH_out"}, "produces": "fH", "source": "bandwidth",
+
+    # Output HF capacitance
+    {"needs": {"C_mu", "C_stray_out"}, "produces": "C_out_hf",
+     "source": "bandwidth",
+     "fn": lambda k: getv(k, "C_mu") + getv(k, "C_stray_out")},
+
+    # Output HF pole
+    {"needs": {"Rc_ac", "C_out_hf"}, "produces": "wH_out",
+     "cond": lambda k: getv(k, "C_out_hf") > 0,
+     "source": "bandwidth",
+     "fn": lambda k: 1.0 / (getv(k, "Rc_ac") * getv(k, "C_out_hf"))},
+
+    {"needs": {"wH_out"}, "produces": "fH_out",
+     "source": "bandwidth",
+     "fn": lambda k: getv(k, "wH_out") / (2.0 * math.pi)},
+
+
+    # Overall high-frequency cutoff
+    {"needs": {"fH_in", "fH_out"}, "produces": "fH",
+     "source": "bandwidth",
      "fn": lambda k: min(getv(k, "fH_in"), getv(k, "fH_out"))},
 ]
 
+# ------------------------------------------------------------
+# LOW-FREQUENCY BANDWIDTH (coupling caps)
+# ------------------------------------------------------------
 
+RULES += [
+
+    # Input coupling pole
+    {"needs": {"Rin_total", "C_in_couple"}, "produces": "wL_in",
+     "cond": lambda k: getv(k, "C_in_couple") > 0,
+     "source": "bandwidth",
+     "fn": lambda k: 1.0 / (getv(k, "Rin_total") * getv(k, "C_in_couple"))},
+
+    {"needs": {"wL_in"}, "produces": "fL_in",
+     "source": "bandwidth",
+     "fn": lambda k: getv(k, "wL_in") / (2.0 * math.pi)},
+
+
+    # Output coupling pole
+    {"needs": {"Rc_ac", "C_out_couple"}, "produces": "wL_out",
+     "cond": lambda k: getv(k, "C_out_couple") > 0,
+     "source": "bandwidth",
+     "fn": lambda k: 1.0 / (getv(k, "Rc_ac") * getv(k, "C_out_couple"))},
+
+    {"needs": {"wL_out"}, "produces": "fL_out",
+     "source": "bandwidth",
+     "fn": lambda k: getv(k, "wL_out") / (2.0 * math.pi)},
+
+
+    # Overall low-frequency cutoff
+    {"needs": {"fL_in", "fL_out"}, "produces": "fL",
+     "source": "bandwidth",
+     "fn": lambda k: max(getv(k, "fL_in"), getv(k, "fL_out"))},
+]
 
 # ============================================================
 # REPORTING (VIEW LAYER)
@@ -575,22 +617,64 @@ def print_report(k, series=E24_VALUES):
                 print(f"{key:<12}: {fmt(vv(key), unit)}")
 
     print("\n[ BANDWIDTH ]")
+
     if "is_forward_active" in k and not vv("is_forward_active"):
         print("Bandwidth model not valid (not in forward-active region).")
+
     else:
         any_bw = False
-        for key, unit in (
+
+        # -------------------------
+        # LOW-FREQUENCY SECTION
+        # -------------------------
+        lf_keys = (
+            ("fL_in", "Hz"),
+            ("fL_out", "Hz"),
+            ("fL", "Hz"),
+            ("C_in_couple", "F"),
+            ("C_out_couple", "F"),
+            ("C_e_bypass", "F"),
+        )
+
+        lf_printed = False
+        for key, unit in lf_keys:
+            if key in k:
+                if not lf_printed:
+                    print("\n  Low-Frequency Poles:")
+                    lf_printed = True
+                any_bw = True
+                print(f"  {key:<14}: {fmt(vv(key), unit)}")
+
+        # -------------------------
+        # HIGH-FREQUENCY SECTION
+        # -------------------------
+        hf_keys = (
             ("fH_in", "Hz"),
             ("fH_out", "Hz"),
             ("fH", "Hz"),
-            ("C_in_total", "F"),
-            ("C_out_total", "F"),
-        ):
+            ("C_pi", "F"),
+            ("C_mu", "F"),
+            ("C_miller", "F"),
+            ("C_in_hf", "F"),
+            ("C_out_hf", "F"),
+        )
+
+        hf_printed = False
+        for key, unit in hf_keys:
             if key in k:
+                if not hf_printed:
+                    print("\n  High-Frequency Poles:")
+                    hf_printed = True
                 any_bw = True
-                print(f"{key:<12}: {fmt(vv(key), unit)}")
+                print(f"  {key:<14}: {fmt(vv(key), unit)}")
+
+        # -------------------------
+        # Fallback
+        # -------------------------
         if not any_bw:
-            print("No capacitances provided; set C_in_total and/or C_out_total to estimate bandwidth.")
+            print("No capacitances provided.")
+            print("Provide C_in_couple / C_out_couple for low-frequency poles.")
+            print("Provide C_pi / C_mu for high-frequency poles.")
 
     print("\n[ OUTPUT SWING ]")
     for key, unit in (
@@ -622,9 +706,9 @@ def print_report(k, series=E24_VALUES):
 
 raw_known = {
     "Vdd": 12,
-    "Vbe": 0.7,
-    "Re": 1000,
-    "Rc": 5000,
+    "Vbe": 0.6,
+    "Vc" : 7.0,
+    "Vb" : 1.92,
     "Vce_min": 0.2,
     "Ic": 1e-3,
     "beta": 100,
@@ -643,8 +727,16 @@ raw_known = {
     "RL": 10000,           # only used if load_enabled True
 
     # bandwidth lumped caps (set to 0 or omit to skip)
-    "C_in_total": 0.0,      # F (e.g. 30e-12 for 30 pF)
-    "C_out_total": 0.0,     # F (e.g. 10e-12 for 10 pF)
+    # ---- LOW-FREQUENCY CAPS ----
+    "C_in_couple": 100e-6,     # input coupling capacitor (F)
+    "C_out_couple": 0.0,       # output coupling capacitor (F)
+    "C_e_bypass": 0.0,         # emitter bypass capacitor (F)
+
+        # ---- HIGH-FREQUENCY CAPS ----
+    "C_pi": 0.0,               # base-emitter diffusion cap (F)
+    "C_mu": 0.0,               # base-collector cap (F)
+    "C_stray_in": 0.0,         # wiring / probe cap at input (F)
+    "C_stray_out": 0.0,        # wiring / load cap at output (F)
 
     # headroom-driven examples (uncomment to use)
     # "set_headroom_down": True,
@@ -765,45 +857,63 @@ def design_optimize_vc(known, target="center"):
     }
 vc_opt = design_optimize_vc(known, target="center")
 
-def design_second_stage_buffer(known, Vin_key="Vout_pk", Ie_target=1e-3, Ve_target=None):
 
+def design_second_stage_buffer(known, Vin_key="Vout_pk", Re_override=None, Ie_target=1e-3):
+    """
+    2nd-stage emitter-follower buffer with correct headroom based on waveform around DC point.
+    Vin_key: AC input amplitude from previous stage (Vout_pk)
+    Re_override: optional emitter resistor
+    """
     print('\n[ 2ND STAGE BUFFER ]')
+
     Vdd = getv(known, "Vdd")
     Vbe = getv(known, "Vbe")
     beta = getv(known, "beta")
+    Vc = getv(known, "Vc")  # use Vc from previous stage as supply for buffer
 
     Rout1 = getv(known, "Rout") if "Rout" in known else 0.0
-    Vin_ac = getv(known, Vin_key) if Vin_key in known else 0.0
+    Vin_pk = getv(known, Vin_key) if Vin_key in known else 0.0
 
-    # DC emitter voltage
-    Ve_dc = 0.33 * Vdd if Ve_target is None else Ve_target
+    # DC emitter voltage fixed at Vc - Vbe
+    Ve_dc = Vc - Vbe
 
-    # DC emitter current
-    Ie = Ie_target
+    # DC collector tied to Vdd
+    Vc_buf = Vdd
 
     # Emitter resistor
-    Re = Ve_dc / Ie
+    Re = 1e3 if Re_override is None else Re_override
 
-    # Small-signal input resistance of emitter follower
+    # DC emitter current
+    Ie = Ve_dc / Re
+
+    # Small-signal AC input/output resistances
     Rin_buf = (beta + 1) * Re
+    Rout_buf = Re / (beta + 1)
 
-    # AC attenuation due to first-stage Rout
-    Vout_ac = Vin_ac * Rin_buf / (Rin_buf + Rout1) if (Rin_buf + Rout1) > 0 else 0.0
+    # AC voltage after first-stage voltage division
+    
+    # Absolute waveform limits
+    Ve_max = Ve_dc + abs(Vin_pk)
+    Ve_min = Ve_dc - abs(Vin_pk)
+    V_swing = Ve_max - Ve_min
 
-    # Collector tied to Vdd
-    Vc = Vdd
+    # Correct headroom based on waveform around DC
+    headroom_up = Vdd - Ve_max
+    headroom_down = Ve_min - Vbe
+
+    # Collector-emitter voltage
     Vce = Vc - Ve_dc
-
-    # Headroom (volts)
-    headroom_up = Vdd - Ve_dc
-    headroom_down = Ve_dc - Vbe
 
     # Store for reporting
     setv(known, "Ve_buf", Ve_dc)
     setv(known, "Ie_buf", Ie)
     setv(known, "Re_buf", Re)
     setv(known, "Rin_buf", Rin_buf)
-    setv(known, "Vout_buf", Vout_ac)
+    setv(known, "Rout_buf", Rout_buf)
+    setv(known, "Vout_buf", Vin_pk)
+    setv(known, "Vout_max_buf", Ve_max)
+    setv(known, "Vout_min_buf", Ve_min)
+    setv(known, "Vout_swing_buf", V_swing)
     setv(known, "Vce_buf", Vce)
     setv(known, "headroom_up_buf", headroom_up)
     setv(known, "headroom_down_buf", headroom_down)
@@ -813,23 +923,26 @@ def design_second_stage_buffer(known, Vin_key="Vout_pk", Ie_target=1e-3, Ve_targ
         "Ve": Ve_dc,
         "Ie": Ie,
         "Re": Re,
-        "Vc": Vc,
+        "Vc_buf": Vc_buf,
         "Vce": Vce,
         "Rin": Rin_buf,
-        "Vout": Vout_ac,
+        "Rout": Rout_buf,
+        "Vout_ac": Vin_pk,
+        "Ve_DC": Ve_dc,
+        "Vout_max": Ve_max,
+        "Vout_min": Ve_min,
+        "Vout_swing": V_swing,
         "headroom_up": headroom_up,
         "headroom_down": headroom_down,
     }
-
-# --- Example: 2nd-stage buffer design ---
-buffer2_params = design_second_stage_buffer(known, Vin_key="Vout_pk", Ie_target=1e-3)
+# --- Example usage ---
+buffer2_params = design_second_stage_buffer(known, Vin_key="Vout_pk")
 # Print results
 for k, v in buffer2_params.items():
-    if k in ("headroom_up", "headroom_down", "Vout", "Vce", "Ve", "Vc"):
+    if k in ("headroom_up", "headroom_down", "Vout", "Vce", "Ve", "Vc", "Vout_max", "Vout_min", "Vout_swing", "Vc_buf", "Ve_DC", "Vout_ac"):
         unit = "V"
     elif k.startswith("I"):
         unit = "A"
     else:
         unit = "Ω"
-
     print(f"{k:<12}: {fmt(v, unit)}")
