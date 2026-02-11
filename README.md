@@ -191,26 +191,3 @@ DEPENDENCY_LOOPS = [
     {"Ib", "beta", "Ic"},   # base-current loop
 ]
 ```
-
-## Rule Groupings
-
-**Bias and KCL/KVL**
-- Current summation, voltage drops, and node voltages.
-
-**Design Intent**
-- Divider sizing, headroom targets, inverse biasing.
-
-**Region Detection**
-- Cutoff, saturation, reverse-active, forward-active.
-
-**Small-Signal Model**
-- gm, re, rpi, gain, and input resistance.
-
-**Bandwidth**
-- Input and output poles using lumped RC models.
-  
-**Reporting**
-- Formatted output and nearest standard resistor selection.
-
-
-
