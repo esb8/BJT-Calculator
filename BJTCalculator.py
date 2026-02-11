@@ -5,24 +5,12 @@ import math
 # ============================================================
 # Higher number = stronger (wins conflicts)
 
-PRIORITY = {
-    "derived": 0,   # plain consequences of equations
-    "design":  1,   # "nice-to-have" intent (symmetric bias, headroom targets, etc.)
-    "user":    2,   # user-fixed inputs (hard targets)
-    "physics": 3,   # non-negotiable constraints (rarely used to overwrite; mostly checks)
-}
-
-
-def _is_meta_value(x):
-    return isinstance(x, dict) and "value" in x and "priority" in x
 
 
 def getv(known, key):
+    """Read a value from `known` (no priority/meta wrapper).
     """
-    Read value regardless of whether known stores raw values or meta values.
-    """
-    v = known[key]
-    return v["value"] if _is_meta_value(v) else v
+    return known[key]
 
 
 def has(known, key):
@@ -33,50 +21,25 @@ def keys(known):
     return set(known.keys())
 
 
-def setv(known, key, value, priority=PRIORITY["derived"], source="rule"):
-    """
-    Priority-aware write:
-      - If key doesn't exist: set it
-      - If key exists:
-          - overwrite only if new priority > old priority
-          - if equal priority and different value: raise error (hard conflict)
-          - else keep existing (yield)
-    Returns True if updated, False otherwise.
+def setv(known, key, value, source="rule"):
+    """Simple write: set or overwrite raw values in `known`.
+    Returns True if updated, False if the value was unchanged.
     """
     if key not in known:
-        known[key] = {"value": value, "priority": priority, "source": source}
+        known[key] = value
         return True
 
-    # existing
-    if _is_meta_value(known[key]):
-        old_val = known[key]["value"]
-        old_pri = known[key]["priority"]
-    else:
-        # legacy raw values treated as "user" by default, because they were fixed inputs
-        old_val = known[key]
-        old_pri = PRIORITY["user"]
-        known[key] = {"value": old_val, "priority": old_pri, "source": "legacy/user"}
-
-    # compare
-    if priority > old_pri:
-        known[key] = {"value": value, "priority": priority, "source": source}
-        return True
-
-    if priority == old_pri:
-        # same "authority": if they disagree meaningfully, it is a real conflict
-        # allow tiny float differences
-        if isinstance(old_val, (int, float)) and isinstance(value, (int, float)):
-            if abs(old_val - value) <= 1e-12 * max(1.0, abs(old_val), abs(value)):
-                return False
-        if old_val != value:
-            raise ValueError(
-                f"Priority conflict on '{key}': "
-                f"{old_val} (source={known[key].get('source')}) vs {value} (source={source})"
-            )
+    old_val = known[key]
+    # consider float near-equality as unchanged
+    if isinstance(old_val, (int, float)) and isinstance(value, (int, float)):
+        if abs(old_val - value) <= 1e-12 * max(1.0, abs(old_val), abs(value)):
+            return False
+    if old_val == value:
         return False
 
-    # lower priority yields
-    return False
+    # Overwrite on difference (no priority system)
+    known[key] = value
+    return True
 
 
 def set_defaults(known, defaults):
@@ -85,17 +48,14 @@ def set_defaults(known, defaults):
     """
     for k, v in defaults.items():
         if k not in known:
-            setv(known, k, v, priority=PRIORITY["derived"], source="default")
+            setv(known, k, v, source="default")
 
 
 def normalize_user_known(raw_known):
     """
     Convert raw user dict to meta dict with priority=user.
     """
-    known = {}
-    for k, v in raw_known.items():
-        setv(known, k, v, priority=PRIORITY["user"], source="user")
-    return known
+    return dict(raw_known)
 
 
 # ============================================================
@@ -121,9 +81,7 @@ def check_overconstrained(known, loops):
         fixed = set()
         for var in loop:
             if var in known:
-                pri = known[var]["priority"] if _is_meta_value(known[var]) else PRIORITY["user"]
-                if pri >= PRIORITY["user"]:
-                    fixed.add(var)
+                fixed.add(var)
 
         if fixed == loop:
             errors.append(loop)
@@ -201,10 +159,9 @@ def solve(known, rules):
             # compute candidate
             value = rule["fn"](known)
 
-            # write with priority (may yield)
-            pri = rule.get("priority", PRIORITY["derived"])
+            # write (no priority system)
             src = rule.get("source", rule.get("tag", "rule"))
-            did = setv(known, out, value, priority=pri, source=src)
+            did = setv(known, out, value, source=src)
             if did:
                 updated = True
 
@@ -215,50 +172,50 @@ def solve(known, rules):
 # EQUATION GENERATORS (GENERIC, REUSABLE)
 # ============================================================
 
-def linear(a, b, out, priority=PRIORITY["derived"], source="linear"):
+def linear(a, b, out, source="linear"):
     """
     out = a * b
     a   = out / b
     b   = out / a
     """
     return [
-        {"needs": {a, b}, "produces": out, "priority": priority, "source": source,
+        {"needs": {a, b}, "produces": out, "source": source,
          "fn": lambda k, a=a, b=b: getv(k, a) * getv(k, b)},
-        {"needs": {out, b}, "produces": a, "priority": priority, "source": source,
+        {"needs": {out, b}, "produces": a, "source": source,
          "fn": lambda k, out=out, b=b: getv(k, out) / getv(k, b)},
-        {"needs": {out, a}, "produces": b, "priority": priority, "source": source,
+        {"needs": {out, a}, "produces": b, "source": source,
          "fn": lambda k, out=out, a=a: getv(k, out) / getv(k, a)},
     ]
 
 
-def diff(a, b, out, priority=PRIORITY["derived"], source="diff"):
+def diff(a, b, out, source="diff"):
     """
     out = a - b
     a   = out + b
     b   = a - out
     """
     return [
-        {"needs": {a, b}, "produces": out, "priority": priority, "source": source,
+        {"needs": {a, b}, "produces": out, "source": source,
          "fn": lambda k, a=a, b=b: getv(k, a) - getv(k, b)},
-        {"needs": {out, b}, "produces": a, "priority": priority, "source": source,
+        {"needs": {out, b}, "produces": a, "source": source,
          "fn": lambda k, out=out, b=b: getv(k, out) + getv(k, b)},
-        {"needs": {a, out}, "produces": b, "priority": priority, "source": source,
+        {"needs": {a, out}, "produces": b, "source": source,
          "fn": lambda k, a=a, out=out: getv(k, a) - getv(k, out)},
     ]
 
 
-def sum3(a, b, out, priority=PRIORITY["derived"], source="sum"):
+def sum3(a, b, out, source="sum"):
     """
     out = a + b
     a   = out - b
     b   = out - a
     """
     return [
-        {"needs": {a, b}, "produces": out, "priority": priority, "source": source,
+        {"needs": {a, b}, "produces": out, "source": source,
          "fn": lambda k, a=a, b=b: getv(k, a) + getv(k, b)},
-        {"needs": {out, b}, "produces": a, "priority": priority, "source": source,
+        {"needs": {out, b}, "produces": a, "source": source,
          "fn": lambda k, out=out, b=b: getv(k, out) - getv(k, b)},
-        {"needs": {out, a}, "produces": b, "priority": priority, "source": source,
+        {"needs": {out, a}, "produces": b, "source": source,
          "fn": lambda k, out=out, a=a: getv(k, out) - getv(k, a)},
     ]
 
@@ -274,27 +231,27 @@ RULES = []
 # ------------------------------------------------------------
 
 RULES += [
-    {"needs": {"Ve", "Vce_min"}, "produces": "Vc_min", "priority": PRIORITY["derived"], "source": "swing",
+    {"needs": {"Ve", "Vce_min"}, "produces": "Vc_min", "source": "swing",
      "fn": lambda k: getv(k, "Ve") + getv(k, "Vce_min")},
 
-    {"needs": {"Vdd"}, "produces": "Vc_max", "priority": PRIORITY["derived"], "source": "swing",
+    {"needs": {"Vdd"}, "produces": "Vc_max", "source": "swing",
      "fn": lambda k: getv(k, "Vdd")},
 
-    {"needs": {"Vc", "Vc_min"}, "produces": "headroom_down", "priority": PRIORITY["derived"], "source": "swing",
+    {"needs": {"Vc", "Vc_min"}, "produces": "headroom_down", "source": "swing",
      "fn": lambda k: getv(k, "Vc") - getv(k, "Vc_min")},
 
-    {"needs": {"Vc_max", "Vc"}, "produces": "headroom_up", "priority": PRIORITY["derived"], "source": "swing",
+    {"needs": {"Vc_max", "Vc"}, "produces": "headroom_up", "source": "swing",
      "fn": lambda k: getv(k, "Vc_max") - getv(k, "Vc")},
 ]
 
 RULES += [
-    {"needs": {"Vout_pk", "headroom_down"}, "produces": "clips_low", "priority": PRIORITY["derived"], "source": "clip",
-     "fn": lambda k: getv(k, "Vout_pk") > getv(k, "headroom_down")},
+    {"needs": {"ac_in", "headroom_down"}, "produces": "clips_low", "source": "clip",
+     "fn": lambda k: getv(k, "ac_in") > getv(k, "headroom_down")},
 
-    {"needs": {"Vout_pk", "headroom_up"}, "produces": "clips_high", "priority": PRIORITY["derived"], "source": "clip",
-     "fn": lambda k: getv(k, "Vout_pk") > getv(k, "headroom_up")},
+    {"needs": {"ac_in", "headroom_up"}, "produces": "clips_high", "source": "clip",
+     "fn": lambda k: getv(k, "ac_in") > getv(k, "headroom_up")},
 
-    {"needs": {"clips_low", "clips_high"}, "produces": "clips", "priority": PRIORITY["derived"], "source": "clip",
+    {"needs": {"clips_low", "clips_high"}, "produces": "clips", "source": "clip",
      "fn": lambda k: bool(getv(k, "clips_low")) or bool(getv(k, "clips_high"))},
 ]
 
@@ -303,9 +260,9 @@ RULES += [
 # ----------------------------
 
 RULES += [
-    {"needs": {"beta"}, "produces": "alpha", "priority": PRIORITY["derived"], "source": "bjt",
+    {"needs": {"beta"}, "produces": "alpha", "source": "bjt",
      "fn": lambda k: getv(k, "beta") / (getv(k, "beta") + 1.0)},
-    {"needs": {"Ic", "beta"}, "produces": "Ib", "priority": PRIORITY["derived"], "source": "bjt",
+    {"needs": {"Ic", "beta"}, "produces": "Ib", "source": "bjt",
      "fn": lambda k: getv(k, "Ic") / getv(k, "beta")},
 ]
 
@@ -313,76 +270,45 @@ RULES += [
 # 2) SUM RELATIONSHIPS (derived)
 # ------------------------------------------------------------
 
-RULES += sum3("Ic", "Ib", "Ie", priority=PRIORITY["derived"], source="kcl")
-RULES += sum3("Ve", "Vbe", "Vb", priority=PRIORITY["derived"], source="vbe")
+RULES += sum3("Ic", "Ib", "Ie", source="kcl")
+RULES += sum3("Ve", "Vbe", "Vb", source="vbe")
 
 # ------------------------------------------------------------
 # 3) LINEAR RELATIONSHIPS (derived)
 # ------------------------------------------------------------
 
-RULES += linear("Ie", "Re", "Ve", priority=PRIORITY["derived"], source="emitter")
-RULES += linear("Ic", "Rc", "Vrc", priority=PRIORITY["derived"], source="collector_drop")
+RULES += linear("Ie", "Re", "Ve", source="emitter")
+RULES += linear("Ic", "Rc", "Vrc", source="collector_drop")
 
 # ------------------------------------------------------------
 # 4) DIFFERENCE RELATIONSHIPS (derived)
 # ------------------------------------------------------------
 
-RULES += diff("Vdd", "Vrc", "Vc", priority=PRIORITY["derived"], source="collector_node")
-RULES += diff("Vc", "Ve", "Vce", priority=PRIORITY["derived"], source="vce")
+RULES += diff("Vdd", "Vrc", "Vc", source="collector_node")
+RULES += diff("Vc", "Ve", "Vce", source="vce")
 
 # ------------------------------------------------------------
 # 5) DESIGN / INTENT RULES (design priority; yield to user)
 # ------------------------------------------------------------
 
 RULES += [
-    {"needs": {"Ib", "divider_ratio"}, "produces": "Idiv", "priority": PRIORITY["design"], "source": "divider_design",
+    {"needs": {"Ib", "divider_ratio"}, "produces": "Idiv", "source": "divider_design",
      "fn": lambda k: getv(k, "divider_ratio") * getv(k, "Ib")},
 
-    {"needs": {"Vb", "Idiv"}, "produces": "R2", "priority": PRIORITY["design"], "source": "divider_design",
+    {"needs": {"Vb", "Idiv"}, "produces": "R2", "source": "divider_design",
      "fn": lambda k: getv(k, "Vb") / getv(k, "Idiv")},
 
-    {"needs": {"Vdd", "Vb", "Idiv", "Ib"}, "produces": "R1", "priority": PRIORITY["design"], "source": "divider_design",
+    {"needs": {"Vdd", "Vb", "Idiv", "Ib"}, "produces": "R1", "source": "divider_design",
      "fn": lambda k: (getv(k, "Vdd") - getv(k, "Vb")) / (getv(k, "Idiv") + getv(k, "Ib"))},
 
-    {"needs": {"R1", "R2"}, "produces": "Req", "priority": PRIORITY["derived"], "source": "divider",
+    {"needs": {"R1", "R2"}, "produces": "Req", "source": "divider",
      "fn": lambda k: (getv(k, "R1") * getv(k, "R2")) / (getv(k, "R1") + getv(k, "R2"))},
 
-    {"needs": {"Vdd", "R1", "R2"}, "produces": "Vth", "priority": PRIORITY["derived"], "source": "divider",
+    {"needs": {"Vdd", "R1", "R2"}, "produces": "Vth", "source": "divider",
      "fn": lambda k: getv(k, "Vdd") * getv(k, "R2") / (getv(k, "R1") + getv(k, "R2"))},
 
-    {"needs": {"Vth", "Ib", "Req"}, "produces": "Vb_loaded", "priority": PRIORITY["derived"], "source": "divider",
+    {"needs": {"Vth", "Ib", "Req"}, "produces": "Vb_loaded", "source": "divider",
      "fn": lambda k: getv(k, "Vth") - getv(k, "Ib") * getv(k, "Req")},
-]
-
-# ------------------------------------------------------------
-# HEADROOM-DRIVEN BIAS (INVERSE DESIGN) (design; yields to user)
-# ------------------------------------------------------------
-
-RULES += [
-    {
-        "needs": {"Ve", "Vce_min", "headroom_down_target", "set_headroom_down"},
-        "produces": "Vc",
-        "cond": lambda k: bool(getv(k, "set_headroom_down")),
-        "priority": PRIORITY["design"],
-        "source": "bias_headroom_down",
-        "fn": lambda k: (getv(k, "Ve") + getv(k, "Vce_min")) + getv(k, "headroom_down_target"),
-    },
-    {
-        "needs": {"Vdd", "headroom_up_target", "set_headroom_up"},
-        "produces": "Vc",
-        "cond": lambda k: bool(getv(k, "set_headroom_up")),
-        "priority": PRIORITY["design"],
-        "source": "bias_headroom_up",
-        "fn": lambda k: getv(k, "Vdd") - getv(k, "headroom_up_target"),
-    },
-    {
-        "needs": {"Vdd", "Ve", "Vce_min", "set_headroom_symmetric"},
-        "produces": "Vc",
-        "cond": lambda k: bool(getv(k, "set_headroom_symmetric")),
-        "priority": PRIORITY["design"],
-        "source": "bias_headroom_sym",
-        "fn": lambda k: 0.5 * (getv(k, "Vdd") + (getv(k, "Ve") + getv(k, "Vce_min"))),
-    },
 ]
 
 # ------------------------------------------------------------
@@ -392,13 +318,13 @@ RULES += [
 RULES += [
     {"needs": {"Rc", "RL", "load_enabled"}, "produces": "Rc_ac",
      "cond": lambda k: bool(getv(k, "load_enabled")),
-     "priority": PRIORITY["derived"], "source": "ac_load",
+     "source": "ac_load",
      "fn": lambda k: (getv(k, "Rc") * getv(k, "RL")) / (getv(k, "Rc") + getv(k, "RL"))},
 
     {"needs": {"Rc", "load_enabled"}, "produces": "Rc_ac",
-     "cond": lambda k: not bool(getv(k, "load_enabled")),
-     "priority": PRIORITY["derived"], "source": "ac_load",
-     "fn": lambda k: getv(k, "Rc")},
+    "cond": lambda k: not bool(getv(k, "load_enabled")),
+    "source": "ac_load",
+    "fn": lambda k: getv(k, "Rc")},
 ]
 
 # ------------------------------------------------------------
@@ -441,29 +367,58 @@ RULES += [
 # ------------------------------------------------------------
 
 RULES += [
-    {"needs": {"Re", "Re_bypassed"}, "produces": "Re_ac", "priority": PRIORITY["derived"], "source": "small_signal",
+    {"needs": {"Re", "Re_bypassed"}, "produces": "Re_ac", "source": "small_signal",
      "fn": lambda k: 0.0 if bool(getv(k, "Re_bypassed")) else getv(k, "Re")},
 
     {"needs": {"Ic", "Vt", "is_forward_active"}, "produces": "gm",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
-     "priority": PRIORITY["derived"], "source": "small_signal",
+     "source": "small_signal",
      "fn": lambda k: getv(k, "Ic") / getv(k, "Vt")},
 
     {"needs": {"gm", "is_forward_active"}, "produces": "re",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
-     "priority": PRIORITY["derived"], "source": "small_signal",
+     "source": "small_signal",
      "fn": lambda k: 1.0 / getv(k, "gm")},
 
     {"needs": {"beta", "gm", "is_forward_active"}, "produces": "rpi",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
-     "priority": PRIORITY["derived"], "source": "small_signal",
+     "source": "small_signal",
      "fn": lambda k: getv(k, "beta") / getv(k, "gm")},
 
     {"needs": {"Rc_ac", "re", "Re_ac", "is_forward_active"}, "produces": "Av",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
-     "priority": PRIORITY["derived"], "source": "small_signal",
+     "source": "small_signal",
      "fn": lambda k: -getv(k, "Rc_ac") / (getv(k, "re") + getv(k, "Re_ac"))},
+    {
+        "needs": {"ac_in", "Av"},        # need input signal and gain
+        "produces": "Vout_pk",           # this is the output peak
+        "cond": lambda k: "Av" in k and "ac_in" in k,  # ensure both exist
+        "source": "ac_peak_calc",
+        "fn": lambda k: getv(k, "ac_in") * getv(k, "Av") # peak value
+    },
+
+    {
+    "needs": {"Rc", "load_enabled", "RL"},
+    "produces": "Rc_ac",
+    "source": "small_signal",
+    "fn": lambda k: (
+        (getv(k,"Rc") * getv(k,"RL"))/(getv(k,"Rc")+getv(k,"RL"))
+        if bool(getv(k,"load_enabled")) else
+        getv(k,"Rc")
+    )
+    },
+
+    {
+    "needs": {"Rc_ac", "is_forward_active"},
+    "produces": "Rout",
+    "cond": lambda k: bool(getv(k, "is_forward_active")),
+    "source": "small_signal",
+    "fn": lambda k: getv(k, "Rc_ac"),
+    }
+
+
 ]
+
 
 # ------------------------------------------------------------
 # 8) BANDWIDTH / POLES (OPTIONAL) (derived)
@@ -472,33 +427,34 @@ RULES += [
 RULES += [
     {"needs": {"Rc_ac", "C_out_total", "is_forward_active"}, "produces": "wH_out",
      "cond": lambda k: bool(getv(k, "is_forward_active")) and (getv(k, "C_out_total") > 0),
-     "priority": PRIORITY["derived"], "source": "bandwidth",
+     "source": "bandwidth",
      "fn": lambda k: 1.0 / (getv(k, "Rc_ac") * getv(k, "C_out_total"))},
 
-    {"needs": {"wH_out"}, "produces": "fH_out", "priority": PRIORITY["derived"], "source": "bandwidth",
+    {"needs": {"wH_out"}, "produces": "fH_out", "source": "bandwidth",
      "fn": lambda k: getv(k, "wH_out") / (2.0 * math.pi)},
 
     {"needs": {"rpi", "beta", "Re_ac", "is_forward_active"}, "produces": "Rin_base",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
-     "priority": PRIORITY["derived"], "source": "bandwidth",
+     "source": "bandwidth",
      "fn": lambda k: getv(k, "rpi") + (getv(k, "beta") + 1.0) * getv(k, "Re_ac")},
 
     {"needs": {"Rin_base", "Req", "is_forward_active"}, "produces": "Rin_total",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
-     "priority": PRIORITY["derived"], "source": "bandwidth",
+     "source": "bandwidth",
      "fn": lambda k: (getv(k, "Rin_base") * getv(k, "Req")) / (getv(k, "Rin_base") + getv(k, "Req"))},
 
     {"needs": {"Rin_total", "C_in_total", "is_forward_active"}, "produces": "wH_in",
      "cond": lambda k: bool(getv(k, "is_forward_active")) and (getv(k, "C_in_total") > 0),
-     "priority": PRIORITY["derived"], "source": "bandwidth",
+     "source": "bandwidth",
      "fn": lambda k: 1.0 / (getv(k, "Rin_total") * getv(k, "C_in_total"))},
 
-    {"needs": {"wH_in"}, "produces": "fH_in", "priority": PRIORITY["derived"], "source": "bandwidth",
+    {"needs": {"wH_in"}, "produces": "fH_in", "source": "bandwidth",
      "fn": lambda k: getv(k, "wH_in") / (2.0 * math.pi)},
 
-    {"needs": {"fH_in", "fH_out"}, "produces": "fH", "priority": PRIORITY["derived"], "source": "bandwidth",
+    {"needs": {"fH_in", "fH_out"}, "produces": "fH", "source": "bandwidth",
      "fn": lambda k: min(getv(k, "fH_in"), getv(k, "fH_out"))},
 ]
+
 
 
 # ============================================================
@@ -613,6 +569,7 @@ def print_report(k, series=E24_VALUES):
             ("rpi", "Ω"),
             ("Av", "V/V"),
             ("Rin_total", "Ω"),
+            ("Rout", "Ω"),
         ):
             if key in k:
                 print(f"{key:<12}: {fmt(vv(key), unit)}")
@@ -637,6 +594,7 @@ def print_report(k, series=E24_VALUES):
 
     print("\n[ OUTPUT SWING ]")
     for key, unit in (
+        ("Vout_pk", "V"),
         ("Vc_min", "V"),
         ("Vc", "V"),
         ("Vc_max", "V"),
@@ -646,8 +604,8 @@ def print_report(k, series=E24_VALUES):
         if key in k:
             print(f"{key:<14}: {fmt(vv(key), unit)}")
 
-    if "Vout_pk" in k:
-        print(f"\n{'Vout_pk':<14}: {fmt(vv('Vout_pk'), 'V')}")
+    if "ac_in" in k:
+        print(f"{'ac_in':<14}: {fmt(vv('ac_in'), 'V')}")
         if "clips_low" in k:
             print(f"{'clips_low':<14}: {vv('clips_low')}")
         if "clips_high" in k:
@@ -666,11 +624,12 @@ raw_known = {
     "Vdd": 12,
     "Vbe": 0.7,
     "Re": 1000,
-    "Rc": 3000,
+    "Rc": 5000,
     "Vce_min": 0.2,
     "Ic": 1e-3,
     "beta": 100,
     "divider_ratio": 10.0,
+    "ac_in": 1.0,
 
     # small-signal constants
     "Vt": 0.02585,
@@ -708,3 +667,169 @@ print("\nFinal known:")
 print({k: getv(known, k) for k in known})
 
 print_report(known)
+
+def design_optimize_vc(known, target="center"):
+    print("\n[ VC OPTIMIZATION SUGGESTIONS ]")
+
+    Vdd = getv(known, "Vdd")
+    Ve = getv(known, "Ve")
+    Vce_min = getv(known, "Vce_min")
+    Vc = getv(known, "Vc")
+    Ic = getv(known, "Ic")
+    Rc = getv(known, "Rc")
+    Re = getv(known, "Re")
+    Ie = getv(known, "Ie")
+
+    if None in (Vdd, Ve, Vce_min, Vc, Ic, Rc, Re, Ie):
+        print("Cannot optimize: missing required parameters")
+        return {
+            "Vc_now": Vc,
+            "Vc_target": None,
+            "delta": None,
+            "suggestions": ["Cannot optimize: missing required parameters"]
+        }
+
+    # --- Compute target collector voltage ---
+    if target == "center":
+        Vc_target = 0.5 * (Vdd + Ve + Vce_min)
+    elif target == "max_swing":
+        Vc_target = Vdd - 1.0
+    elif target == "low_distortion":
+        Vc_target = Ve + Vce_min + 1.5
+    else:
+        raise ValueError("Unknown target")
+
+    delta_vc = Vc_target - Vc
+    suggestions = []
+
+    # --- Reporting header ---
+    print(f"Current Vc : {fmt(Vc, 'V')}")
+    print(f"Target Vc  : {fmt(Vc_target, 'V')}")
+    print(f"Delta      : {fmt(delta_vc, 'V')}")
+
+    if abs(delta_vc) < 0.01:
+        print("Collector already near target — no adjustment needed.")
+        return {
+            "Vc_now": Vc,
+            "Vc_target": Vc_target,
+            "delta": delta_vc,
+            "suggestions": []
+        }
+
+    print("Suggested adjustments:")
+
+    # Option 1: Adjust Rc
+    if Ic != 0:
+        Rc_new = Rc + delta_vc / Ic
+        if Rc_new > 0.0:
+            msg = (
+                f"Adjust Rc from {Rc:.1f}Ω → {Rc_new:.1f}Ω "
+                f"to move Vc by {delta_vc:.3f}V"
+            )
+            suggestions.append(msg)
+            print(f"  - {msg}")
+
+    # Option 2: Adjust Ic (via bias)
+    if Rc != 0:
+        Ic_new = Ic + delta_vc / Rc
+        if Ic_new > 0.0:
+            msg = (
+                f"Adjust Ic from {Ic:.3e}A → {Ic_new:.3e}A "
+                f"(via base bias) to move Vc by {delta_vc:.3f}V"
+            )
+            suggestions.append(msg)
+            print(f"  - {msg}")
+
+    # Option 3: Adjust Re (affects Ve)
+    if Ie != 0:
+        Re_new = Re + delta_vc / Ie
+        if Re_new > 0.0:
+            msg = (
+                f"Adjust Re from {Re:.1f}Ω → {Re_new:.1f}Ω "
+                f"to shift Vc by changing Ve"
+            )
+            suggestions.append(msg)
+            print(f"  - {msg}")
+
+    # Option 4: Bias divider
+    if "R1" in known and "R2" in known:
+        msg = "Adjust bias divider R1/R2 to shift Ib and hence Ic (affects Vc)"
+        suggestions.append(msg)
+        print(f"  - {msg}")
+
+    return {
+        "Vc_now": Vc,
+        "Vc_target": Vc_target,
+        "delta": delta_vc,
+        "suggestions": suggestions
+    }
+vc_opt = design_optimize_vc(known, target="center")
+
+def design_second_stage_buffer(known, Vin_key="Vout_pk", Ie_target=1e-3, Ve_target=None):
+
+    print('\n[ 2ND STAGE BUFFER ]')
+    Vdd = getv(known, "Vdd")
+    Vbe = getv(known, "Vbe")
+    beta = getv(known, "beta")
+
+    Rout1 = getv(known, "Rout") if "Rout" in known else 0.0
+    Vin_ac = getv(known, Vin_key) if Vin_key in known else 0.0
+
+    # DC emitter voltage
+    Ve_dc = 0.33 * Vdd if Ve_target is None else Ve_target
+
+    # DC emitter current
+    Ie = Ie_target
+
+    # Emitter resistor
+    Re = Ve_dc / Ie
+
+    # Small-signal input resistance of emitter follower
+    Rin_buf = (beta + 1) * Re
+
+    # AC attenuation due to first-stage Rout
+    Vout_ac = Vin_ac * Rin_buf / (Rin_buf + Rout1) if (Rin_buf + Rout1) > 0 else 0.0
+
+    # Collector tied to Vdd
+    Vc = Vdd
+    Vce = Vc - Ve_dc
+
+    # Headroom (volts)
+    headroom_up = Vdd - Ve_dc
+    headroom_down = Ve_dc - Vbe
+
+    # Store for reporting
+    setv(known, "Ve_buf", Ve_dc)
+    setv(known, "Ie_buf", Ie)
+    setv(known, "Re_buf", Re)
+    setv(known, "Rin_buf", Rin_buf)
+    setv(known, "Vout_buf", Vout_ac)
+    setv(known, "Vce_buf", Vce)
+    setv(known, "headroom_up_buf", headroom_up)
+    setv(known, "headroom_down_buf", headroom_down)
+    setv(known, "is_forward_active_buf", True)
+
+    return {
+        "Ve": Ve_dc,
+        "Ie": Ie,
+        "Re": Re,
+        "Vc": Vc,
+        "Vce": Vce,
+        "Rin": Rin_buf,
+        "Vout": Vout_ac,
+        "headroom_up": headroom_up,
+        "headroom_down": headroom_down,
+    }
+
+# --- Example: 2nd-stage buffer design ---
+buffer2_params = design_second_stage_buffer(known, Vin_key="Vout_pk", Ie_target=1e-3)
+# Print results
+for k, v in buffer2_params.items():
+    if k in ("headroom_up", "headroom_down", "Vout", "Vce", "Ve", "Vc"):
+        unit = "V"
+    elif k.startswith("I"):
+        unit = "A"
+    else:
+        unit = "Ω"
+
+    print(f"{k:<12}: {fmt(v, unit)}")
