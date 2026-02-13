@@ -303,6 +303,14 @@ RULES += [
 
     {"needs": {"Vth", "Ib", "Req"}, "produces": "Vb_loaded", "source": "divider",
      "fn": lambda k: getv(k, "Vth") - getv(k, "Ib") * getv(k, "Req")},
+     
+    # Compute R2 for Thevenin voltage
+    {"needs": {"Vth", "Idiv"}, "produces": "R2_th", "source": "divider_design",
+     "fn": lambda k: getv(k, "Vth") / getv(k, "Idiv")},
+
+    # Compute R1 for Thevenin voltage
+    {"needs": {"Vdd", "Vth", "Idiv"}, "produces": "R1_th", "source": "divider_design",
+     "fn": lambda k: (getv(k, "Vdd") - getv(k, "Vth")) / getv(k, "Idiv")},
 ]
 
 # ------------------------------------------------------------
@@ -379,7 +387,7 @@ RULES += [
      "source": "small_signal",
      "fn": lambda k: getv(k, "beta") / getv(k, "gm")},
 
-    {"needs": {"Rc_ac", "re", "Re_ac", "is_forward_active"}, "produces": "Av",
+    {"needs": {"Rc_ac", "Re", "Re_ac", "is_forward_active"}, "produces": "Av",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "small_signal",
      "fn": lambda k: -getv(k, "Rc_ac") / (getv(k, "re") + getv(k, "Re_ac"))},
@@ -409,9 +417,11 @@ RULES += [
     "source": "small_signal",
     "fn": lambda k: getv(k, "Rc_ac"),
     }
-
+    
 
 ]
+# Solve for Rc_ac from Av_target
+
 
 
 # ------------------------------------------------------------
@@ -500,7 +510,7 @@ RULES += [
 ]
 
 # ============================================================
-# REPORTING (VIEW LAYER)
+# REPORTING FUNCTIONS
 # ============================================================
 
 def fmt(v, unit=""):
@@ -548,10 +558,10 @@ def print_report(k, series=E24_VALUES):
                 print(f"{key:<12}: {fmt(val, unit)}")
 
     print("\n[ BASE ]")
-    for key, unit in (("Vb", "V"), ("Vb_loaded", "V"), ("Ib", "A"), ("Vbc", "V")):
+    for key, unit in (("Vb", "V"), ("Vb_loaded", "V"), ("Ib", "A"), ("Vbc", "V"), ("Vth", "V")):
         if key in k:
             print(f"{key:<12}: {fmt(vv(key), unit)}")
-    for r in ("R1", "R2", "Req"):
+    for r in ("R1", "R2", "Req", "R1_th", "R2_th"):
         if r in k:
             print_resistor_block(r, vv(r), series)
 
@@ -701,65 +711,8 @@ def print_report(k, series=E24_VALUES):
 
 
 # ============================================================
-# RUN
+# DESIGN FUNCTIONS
 # ============================================================
-
-raw_known = {
-    "Vdd": 12,
-    "Vbe": 0.6,
-    "Vc" : 7.0,
-    "Vb" : 1.92,
-    "Vce_min": 0.2,
-    "Ic": 1e-3,
-    "beta": 100,
-    "divider_ratio": 10.0,
-    "ac_in": 1.0,
-
-    # small-signal constants
-    "Vt": 0.02585,
-    "I_cutoff": 1e-6,
-
-    # bypass option
-    "Re_bypassed": False,
-
-    # load option
-    "load_enabled": False,  # set True to use RL
-    "RL": 10000,           # only used if load_enabled True
-
-    # bandwidth lumped caps (set to 0 or omit to skip)
-    # ---- LOW-FREQUENCY CAPS ----
-    "C_in_couple": 100e-6,     # input coupling capacitor (F)
-    "C_out_couple": 0.0,       # output coupling capacitor (F)
-    "C_e_bypass": 0.0,         # emitter bypass capacitor (F)
-
-        # ---- HIGH-FREQUENCY CAPS ----
-    "C_pi": 0.0,               # base-emitter diffusion cap (F)
-    "C_mu": 0.0,               # base-collector cap (F)
-    "C_stray_in": 0.0,         # wiring / probe cap at input (F)
-    "C_stray_out": 0.0,        # wiring / load cap at output (F)
-
-    # headroom-driven examples (uncomment to use)
-    # "set_headroom_down": True,
-    # "headroom_down_target": 2.0,
-    # "set_headroom_up": True,
-    # "headroom_up_target": 2.0,
-    # "set_headroom_symmetric": True,
-}
-
-known = normalize_user_known(raw_known)
-
-print("Initial known (user-fixed):")
-print({k: getv(known, k) for k in known})
-
-check_overconstrained(known, DEPENDENCY_LOOPS)
-
-known = solve(known, RULES)
-
-print("\nFinal known:")
-print({k: getv(known, k) for k in known})
-
-print_report(known)
-
 def design_optimize_vc(known, target="center"):
     print("\n[ VC OPTIMIZATION SUGGESTIONS ]")
 
@@ -855,7 +808,6 @@ def design_optimize_vc(known, target="center"):
         "delta": delta_vc,
         "suggestions": suggestions
     }
-vc_opt = design_optimize_vc(known, target="center")
 
 
 def design_second_stage_buffer(known, Vin_key="Vout_pk", Re_override=None, Ie_target=1e-3):
@@ -935,14 +887,75 @@ def design_second_stage_buffer(known, Vin_key="Vout_pk", Re_override=None, Ie_ta
         "headroom_up": headroom_up,
         "headroom_down": headroom_down,
     }
-# --- Example usage ---
-buffer2_params = design_second_stage_buffer(known, Vin_key="Vout_pk")
-# Print results
-for k, v in buffer2_params.items():
-    if k in ("headroom_up", "headroom_down", "Vout", "Vce", "Ve", "Vc", "Vout_max", "Vout_min", "Vout_swing", "Vc_buf", "Ve_DC", "Vout_ac"):
-        unit = "V"
-    elif k.startswith("I"):
-        unit = "A"
-    else:
-        unit = "Ω"
-    print(f"{k:<12}: {fmt(v, unit)}")
+
+
+def design_input_buffer(
+    Vdd,
+    Vin_pk,
+    beta=100,
+    Vbe=0.7,
+    Ie_target=1e-3,
+    divider_stiffness=10
+):
+    """
+    Standalone emitter-follower input buffer design.
+
+    Inputs:
+        Vdd             : Supply voltage
+        Vin_pk          : Peak input signal amplitude
+        beta            : Transistor beta
+        Vbe             : Base-emitter voltage
+        Ie_target       : Desired emitter DC current
+        divider_stiffness : Divider current multiplier over base current
+
+    Returns dictionary of DC bias, AC swing, and bias resistor values.
+    """
+
+    print("\n[ INPUT BUFFER DESIGN ]")
+
+    # --- DC Bias Target ---
+    Ve_dc = Vdd / 2                 # mid-supply for symmetric swing
+    Vb_dc = Ve_dc + Vbe
+
+    # --- Emitter resistor ---
+    Re = Ve_dc / Ie_target
+    Ie = Ie_target
+    Ib = Ie / beta
+
+    # --- Bias Divider Design ---
+    I_div = divider_stiffness * Ib
+    R2 = Vb_dc / I_div
+    R1 = (Vdd - Vb_dc) / I_div
+
+    # --- Small Signal Parameters ---
+    Rin_base = (beta + 1) * Re
+    Rout_emitter = Re / (beta + 1)
+
+    # --- AC Swing ---
+    Ve_max = Ve_dc + Vin_pk
+    Ve_min = Ve_dc - Vin_pk
+    Vout_swing = Ve_max - Ve_min
+
+    # --- Headroom Checks ---
+    headroom_up = Vdd - Ve_max
+    headroom_down = Ve_min - Vbe
+
+    is_forward_active = headroom_up > 0 and headroom_down > 0
+
+    return {
+        "Ve_DC": Ve_dc,
+        "Vb_DC": Vb_dc,
+        "Ie": Ie,
+        "Re": Re,
+        "R1": R1,
+        "R2": R2,
+        "Rin": Rin_base,
+        "Rout": Rout_emitter,
+        "Vout_pk": Vin_pk,
+        "Vout_max": Ve_max,
+        "Vout_min": Ve_min,
+        "Vout_swing": Vout_swing,
+        "headroom_up": headroom_up,
+        "headroom_down": headroom_down,
+        "is_forward_active": is_forward_active,
+    }
