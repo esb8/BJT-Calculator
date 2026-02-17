@@ -4,6 +4,8 @@ import math
 def getv(known, key):
     """Read a value from `known` (no priority/meta wrapper).
     """
+    if key not in known:
+        return None
     return known[key]
 
 
@@ -24,7 +26,7 @@ def setv(known, key, value, source="rule"):
         return True
 
     old_val = known[key]
-    # consider float near-equality as unchanged
+    # consider float near-equality as unchange  d
     if isinstance(old_val, (int, float)) and isinstance(value, (int, float)):
         if abs(old_val - value) <= 1e-12 * max(1.0, abs(old_val), abs(value)):
             return False
@@ -125,24 +127,34 @@ def nearest_resistors(target, series, n=3):
 # ============================================================
 # RULE ENGINE CORE (PRIORITY-AWARE)
 # ============================================================
-
-def solve(known, rules):
+def solve(known, rules, tags=None):
     """
-    Priority-aware fixed-point solver.
+    Tag-aware fixed-point solver.
 
-    Rule schema:
-      - needs: set[str]
-      - produces: str
-      - fn: lambda k: ...
-      - cond: optional lambda k: bool
-      - priority: optional, defaults to derived
-      - source: optional human label
+    active_tags: set[str] or None
+        If provided, only rules whose tags intersect this set will run.
+        Rules without 'tags' default to {"dc"}.
     """
     updated = True
     while updated:
         updated = False
         for rule in rules:
+
+            # ----------------------------
+            # TAG FILTERING
+            # ----------------------------
+            rule_tags = rule.get("tags", {"dc"})
+            if tags is not None:
+                if rule_tags.isdisjoint(tags):
+                    continue
+
             out = rule["produces"]
+
+            # ----------------------------
+            # SKIP IF OUTPUT ALREADY KNOWN
+            # ----------------------------
+            if out in known:  # <-- generic check added
+                continue
 
             # can we run?
             if not rule["needs"].issubset(keys(known)):
@@ -153,25 +165,25 @@ def solve(known, rules):
             # compute candidate
             value = rule["fn"](known)
 
-            # write (no priority system)
-            src = rule.get("source", rule.get("tag", "rule"))
+            # write
+            src = rule.get("source", "rule")
             did = setv(known, out, value, source=src)
             if did:
                 updated = True
 
     return known
 
-
 # ============================================================
 # EQUATION GENERATORS (GENERIC, REUSABLE)
 # ============================================================
 
-def linear(a, b, out, source="linear"):
+def linear(a, b, out, source="linear", tags=None):
     """
     out = a * b
     a   = out / b
     b   = out / a
     """
+
     return [
         {"needs": {a, b}, "produces": out, "source": source,
          "fn": lambda k, a=a, b=b: getv(k, a) * getv(k, b)},
@@ -182,7 +194,7 @@ def linear(a, b, out, source="linear"):
     ]
 
 
-def diff(a, b, out, source="diff"):
+def diff(a, b, out, source="diff", tags=None):
     """
     out = a - b
     a   = out + b
@@ -198,7 +210,7 @@ def diff(a, b, out, source="diff"):
     ]
 
 
-def sum3(a, b, out, source="sum"):
+def sum3(a, b, out, source="sum", tags=None):
     """
     out = a + b
     a   = out - b
@@ -213,149 +225,241 @@ def sum3(a, b, out, source="sum"):
          "fn": lambda k, out=out, a=a: getv(k, out) - getv(k, a)},
     ]
 
-
-# ============================================================
-# RULE SET (DECLARATIVE)
-# ============================================================
-
 RULES = []
 
-# ------------------------------------------------------------
-# OUTPUT SWING / CLIPPING CHECKS (derived)
-# ------------------------------------------------------------
+# Linear Rc rule is always present, but only runs if Rc is NOT bypassed
+
+# Ic-from-Ie rule for bypassed Rc
+
+
+# ============================================================
+# SWING / HEADROOM  (AMP)
+# ============================================================
 
 RULES += [
-    {"needs": {"Ve", "Vce_min"}, "produces": "Vc_min", "source": "swing",
+    {"needs": {"Ve", "Vce_min"}, "produces": "Vc_min",
+     "source": "swing",
+     "tags": {"amp"},
      "fn": lambda k: getv(k, "Ve") + getv(k, "Vce_min")},
 
-    {"needs": {"Vdd"}, "produces": "Vc_max", "source": "swing",
+    {"needs": {"Vdd"}, "produces": "Vc_max",
+     "source": "swing",
+     "tags": {"amp"},
      "fn": lambda k: getv(k, "Vdd")},
 
-    {"needs": {"Vc", "Vc_min"}, "produces": "headroom_down", "source": "swing",
+    {"needs": {"Vc", "Vc_min"}, "produces": "headroom_down",
+     "source": "swing",
+     "tags": {"amp"},
      "fn": lambda k: getv(k, "Vc") - getv(k, "Vc_min")},
 
-    {"needs": {"Vc_max", "Vc"}, "produces": "headroom_up", "source": "swing",
+    {"needs": {"Vc_max", "Vc"}, "produces": "headroom_up",
+     "source": "swing",
+     "tags": {"amp"},
      "fn": lambda k: getv(k, "Vc_max") - getv(k, "Vc")},
 ]
 
+
+# ============================================================
+# CLIPPING  (AMP)
+# ============================================================
+
 RULES += [
-    {"needs": {"ac_in", "headroom_down"}, "produces": "clips_low", "source": "clip",
+    {"needs": {"ac_in", "headroom_down"}, "produces": "clips_low",
+     "source": "clip",
+     "tags": {"amp"},
      "fn": lambda k: getv(k, "ac_in") > getv(k, "headroom_down")},
 
-    {"needs": {"ac_in", "headroom_up"}, "produces": "clips_high", "source": "clip",
+    {"needs": {"ac_in", "headroom_up"}, "produces": "clips_high",
+     "source": "clip",
+     "tags": {"amp"},
      "fn": lambda k: getv(k, "ac_in") > getv(k, "headroom_up")},
 
-    {"needs": {"clips_low", "clips_high"}, "produces": "clips", "source": "clip",
+    {"needs": {"clips_low", "clips_high"}, "produces": "clips",
+     "source": "clip",
+     "tags": {"amp"},
      "fn": lambda k: bool(getv(k, "clips_low")) or bool(getv(k, "clips_high"))},
 ]
 
-# ----------------------------
-# (1) BJT β/α relationships (derived)
-# ----------------------------
+
+# ============================================================
+# (1) BJT β/α RELATIONSHIPS  (DC)
+# ============================================================
 
 RULES += [
-    {"needs": {"beta"}, "produces": "alpha", "source": "bjt",
+    {"needs": {"beta"}, "produces": "alpha",
+     "source": "bjt",
+     "tags": {"dc"},
      "fn": lambda k: getv(k, "beta") / (getv(k, "beta") + 1.0)},
-    {"needs": {"Ic", "beta"}, "produces": "Ib", "source": "bjt",
+
+    {"needs": {"Ic", "beta"}, "produces": "Ib",
+     "source": "bjt",
+     "tags": {"dc"},
      "fn": lambda k: getv(k, "Ic") / getv(k, "beta")},
 ]
 
-# ------------------------------------------------------------
-# 2) SUM RELATIONSHIPS (derived)
-# ------------------------------------------------------------
+# Only compute Ic/Ib if Rc is bypassed
+RULES += [
+    {"needs": {"Ie", "beta"}, "produces": "Ic",
+     "tags": {"dc"},
+     "cond": lambda k: bool(getv(k, "Rc_bypassed")) is True,
+     "fn": lambda k: getv(k,"Ie") * getv(k,"beta") / (getv(k,"beta") + 1)
+    },
+    {"needs": {"Ie", "beta"}, "produces": "Ib",
+     "tags": {"dc"},
+     "cond": lambda k: bool(getv(k, "Rc_bypassed")) is True,
+     "fn": lambda k: getv(k,"Ie") / (getv(k,"beta") + 1)
+    }
+]
 
-RULES += sum3("Ic", "Ib", "Ie", source="kcl")
-RULES += sum3("Ve", "Vbe", "Vb", source="vbe")
+# Skip collector drop rules if Rc is bypassed
+for rule in RULES:
+    if rule.get("source") == "collector_drop":
+        rule["cond"] = lambda k: not bool(getv(k, "Rc_bypassed"))
 
-# ------------------------------------------------------------
-# 3) LINEAR RELATIONSHIPS (derived)
-# ------------------------------------------------------------
+# ============================================================
+# (2) SUM RELATIONSHIPS  (DC)
+# ============================================================
 
-RULES += linear("Ie", "Re", "Ve", source="emitter")
-RULES += linear("Ic", "Rc", "Vrc", source="collector_drop")
+RULES += sum3("Ic", "Ib", "Ie", source="kcl", tags={"dc"})
+RULES += sum3("Ve", "Vbe", "Vb", source="vbe", tags={"dc"}) ## RC bypassed necearry
 
-# ------------------------------------------------------------
-# 4) DIFFERENCE RELATIONSHIPS (derived)
-# ------------------------------------------------------------
 
-RULES += diff("Vdd", "Vrc", "Vc", source="collector_node")
-RULES += diff("Vc", "Ve", "Vce", source="vce")
+# ============================================================
+# (3) LINEAR RELATIONSHIPS  (DC)
+# ============================================================
 
-# ------------------------------------------------------------
-# 5) DESIGN / INTENT RULES (design priority; yield to user)
-# ------------------------------------------------------------
+RULES += linear("Ie", "Re", "Ve", source="emitter", tags={"dc"})
+
+
+# Suppose you have a flag `rc_bypassed` in your knowns
+RULES += linear("Ic", "Rc", "Vrc", source="collector_drop", tags={"dc"})
+
+
+# ============================================================
+# (4) DIFFERENCE RELATIONSHIPS  (DC)
+# ============================================================
+
+RULES += diff("Vdd", "Vrc", "Vc",
+              source="collector_node",
+              tags={"dc"})
+
+RULES += diff("Vc", "Ve", "Vce",
+              source="vce",
+              tags={"dc"})
+
+
+# ============================================================
+# (5) DESIGN / INTENT RULES  (DC)
+# ============================================================
 
 RULES += [
-    {"needs": {"Ib", "divider_ratio"}, "produces": "Idiv", "source": "divider_design",
+    {"needs": {"Ib", "divider_ratio"}, "produces": "Idiv",
+     "source": "divider_design",
+     "tags": {"dc"},
      "fn": lambda k: getv(k, "divider_ratio") * getv(k, "Ib")},
 
-    {"needs": {"Vb", "Idiv"}, "produces": "R2", "source": "divider_design",
+    {"needs": {"Vb", "Idiv"}, "produces": "R2",
+     "source": "divider_design",
+     "tags": {"dc"},
      "fn": lambda k: getv(k, "Vb") / getv(k, "Idiv")},
 
-    {"needs": {"Vdd", "Vb", "Idiv", "Ib"}, "produces": "R1", "source": "divider_design",
-     "fn": lambda k: (getv(k, "Vdd") - getv(k, "Vb")) / (getv(k, "Idiv") + getv(k, "Ib"))},
+    {"needs": {"Vdd", "Vb", "Idiv", "Ib"}, "produces": "R1",
+     "source": "divider_design",
+     "tags": {"dc"},
+     "fn": lambda k: (getv(k, "Vdd") - getv(k, "Vb")) /
+                    (getv(k, "Idiv") + getv(k, "Ib"))},
 
-    {"needs": {"R1", "R2"}, "produces": "Req", "source": "divider",
-     "fn": lambda k: (getv(k, "R1") * getv(k, "R2")) / (getv(k, "R1") + getv(k, "R2"))},
+    {"needs": {"R1", "R2"}, "produces": "Req",
+     "source": "divider",
+     "tags": {"dc"},
+     "fn": lambda k: (getv(k, "R1") * getv(k, "R2")) /
+                    (getv(k, "R1") + getv(k, "R2"))},
 
-    {"needs": {"Vdd", "R1", "R2"}, "produces": "Vth", "source": "divider",
-     "fn": lambda k: getv(k, "Vdd") * getv(k, "R2") / (getv(k, "R1") + getv(k, "R2"))},
+    {"needs": {"Vdd", "R1", "R2"}, "produces": "Vth",
+     "source": "divider",
+     "tags": {"dc"},
+     "fn": lambda k: getv(k, "Vdd") * getv(k, "R2") /
+                    (getv(k, "R1") + getv(k, "R2"))},
 
-    {"needs": {"Vth", "Ib", "Req"}, "produces": "Vb_loaded", "source": "divider",
-     "fn": lambda k: getv(k, "Vth") - getv(k, "Ib") * getv(k, "Req")},
-     
-    # Compute R2 for Thevenin voltage
-    {"needs": {"Vth", "Idiv"}, "produces": "R2_th", "source": "divider_design",
+    {"needs": {"Vth", "Ib", "Req"}, "produces": "Vb_loaded",
+     "source": "divider",
+     "tags": {"dc"},
+     "fn": lambda k: getv(k, "Vth") -
+                    getv(k, "Ib") * getv(k, "Req")},
+
+    {"needs": {"Vth", "Idiv"}, "produces": "R2_th",
+     "source": "divider_design",
+     "tags": {"dc"},
      "fn": lambda k: getv(k, "Vth") / getv(k, "Idiv")},
 
-    # Compute R1 for Thevenin voltage
-    {"needs": {"Vdd", "Vth", "Idiv"}, "produces": "R1_th", "source": "divider_design",
-     "fn": lambda k: (getv(k, "Vdd") - getv(k, "Vth")) / getv(k, "Idiv")},
+    {"needs": {"Vdd", "Vth", "Idiv"}, "produces": "R1_th",
+     "source": "divider_design",
+     "tags": {"dc"},
+     "fn": lambda k: (getv(k, "Vdd") - getv(k, "Vth")) /
+                    getv(k, "Idiv")},
 ]
 
-# ------------------------------------------------------------
-# 5b) OUTPUT LOADING (AC) (derived)
-# ------------------------------------------------------------
+
+# ============================================================
+# (5b) OUTPUT LOADING (AC)  (AMP)
+# ============================================================
 
 RULES += [
-    {"needs": {"Rc", "RL", "load_enabled"}, "produces": "Rc_ac",
+    {"needs": {"Rc", "RL", "load_enabled"},
+     "produces": "Rc_ac",
      "cond": lambda k: bool(getv(k, "load_enabled")),
      "source": "ac_load",
-     "fn": lambda k: (getv(k, "Rc") * getv(k, "RL")) / (getv(k, "Rc") + getv(k, "RL"))},
+     "tags": {"amp"},
+     "fn": lambda k: (getv(k, "Rc") * getv(k, "RL")) /
+                    (getv(k, "Rc") + getv(k, "RL"))},
 
-    {"needs": {"Rc", "load_enabled"}, "produces": "Rc_ac",
-    "cond": lambda k: not bool(getv(k, "load_enabled")),
-    "source": "ac_load",
-    "fn": lambda k: getv(k, "Rc")},
+    {"needs": {"Rc", "load_enabled"},
+     "produces": "Rc_ac",
+     "cond": lambda k: not bool(getv(k, "load_enabled")),
+     "source": "ac_load",
+     "tags": {"amp"},
+     "fn": lambda k: getv(k, "Rc")},
 ]
 
-# ------------------------------------------------------------
-# 6) REGION-OF-OPERATION CHECKS (derived)
-# ------------------------------------------------------------
+
+# ============================================================
+# (6) REGION OF OPERATION  (DC)
+# ============================================================
 
 RULES += [
     {"needs": {"Vb", "Vc"}, "produces": "Vbc",
+     "tags": {"dc"},
      "fn": lambda k: getv(k, "Vb") - getv(k, "Vc")},
 
     {"needs": {"Vbe", "Ic", "I_cutoff"}, "produces": "is_cutoff",
-     "fn": lambda k: (getv(k, "Vbe") < 0.6) or (getv(k, "Ic") <= getv(k, "I_cutoff"))},
+     "tags": {"dc"},
+     "fn": lambda k:
+        (getv(k, "Vbe") < 0.6) or
+        (getv(k, "Ic") <= getv(k, "I_cutoff"))},
 
     {"needs": {"Vce", "Vce_min"}, "produces": "is_saturation",
-     "fn": lambda k: getv(k, "Vce") <= getv(k, "Vce_min")},
+     "tags": {"dc"},
+     "fn": lambda k:
+        getv(k, "Vce") <= getv(k, "Vce_min")},
 
     {"needs": {"Vbc"}, "produces": "is_reverse_active",
-     "fn": lambda k: getv(k, "Vbc") > 0},
+     "tags": {"dc"},
+     "fn": lambda k:
+        getv(k, "Vbc") > 0},
 
     {"needs": {"is_cutoff", "is_saturation", "is_reverse_active"},
      "produces": "is_forward_active",
+     "tags": {"dc"},
      "fn": lambda k: not (
          bool(getv(k, "is_cutoff")) or
          bool(getv(k, "is_saturation")) or
          bool(getv(k, "is_reverse_active"))
      )},
 
-    {"needs": {"is_cutoff", "is_saturation", "is_reverse_active", "is_forward_active"},
+    {"needs": {"is_cutoff", "is_saturation",
+               "is_reverse_active", "is_forward_active"},
      "produces": "region",
+     "tags": {"dc"},
      "fn": lambda k:
         "cutoff" if bool(getv(k, "is_cutoff")) else
         "saturation" if bool(getv(k, "is_saturation")) else
@@ -363,120 +467,158 @@ RULES += [
         "forward-active (linear)"},
 ]
 
-
 # ------------------------------------------------------------
 # 7) SMALL SIGNAL (ONLY VALID IN FORWARD-ACTIVE) (derived)
 # ------------------------------------------------------------
-
 RULES += [
-    {"needs": {"Re", "Re_bypassed"}, "produces": "Re_ac", "source": "small_signal",
-     "fn": lambda k: 0.0 if bool(getv(k, "Re_bypassed")) else getv(k, "Re")},
 
-    {"needs": {"Ic", "Vt", "is_forward_active"}, "produces": "gm",
+    # AC emitter resistance (bypass aware)
+    {"needs": {"Re", "Re_bypassed", "is_forward_active"},
+     "produces": "Re_ac",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "small_signal",
+     "tag": "ac",
+     "fn": lambda k: 0.0 if bool(getv(k, "Re_bypassed"))
+                     else getv(k, "Re")},
+
+    # gm = Ic / Vt
+    {"needs": {"Ic", "Vt", "is_forward_active"},
+     "produces": "gm",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
+     "source": "small_signal",
+     "tag": "ac",
      "fn": lambda k: getv(k, "Ic") / getv(k, "Vt")},
 
-    {"needs": {"gm", "is_forward_active"}, "produces": "re",
+    # re = 1/gm
+    {"needs": {"gm", "is_forward_active"},
+     "produces": "re",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "small_signal",
+     "tag": "ac",
      "fn": lambda k: 1.0 / getv(k, "gm")},
 
-    {"needs": {"beta", "gm", "is_forward_active"}, "produces": "rpi",
+    # rπ = β / gm
+    {"needs": {"beta", "gm", "is_forward_active"},
+     "produces": "rpi",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "small_signal",
+     "tag": "ac",
      "fn": lambda k: getv(k, "beta") / getv(k, "gm")},
 
-    {"needs": {"Rc_ac", "Re", "Re_ac", "is_forward_active"}, "produces": "Av",
+    # Rc || RL  (AC only)
+    {"needs": {"Rc", "load_enabled", "RL", "is_forward_active"},
+     "produces": "Rc_ac",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "small_signal",
-     "fn": lambda k: -getv(k, "Rc_ac") / (getv(k, "re") + getv(k, "Re_ac"))},
-    {
-        "needs": {"ac_in", "Av"},        # need input signal and gain
-        "produces": "Vout_pk",           # this is the output peak
-        "cond": lambda k: "Av" in k and "ac_in" in k,  # ensure both exist
-        "source": "ac_peak_calc",
-        "fn": lambda k: getv(k, "ac_in") * getv(k, "Av") # peak value
-    },
+     "tag": "ac",
+     "fn": lambda k: (
+         (getv(k,"Rc") * getv(k,"RL")) /
+         (getv(k,"Rc") + getv(k,"RL"))
+         if bool(getv(k,"load_enabled"))
+         else getv(k,"Rc")
+     )},
 
-    {
-    "needs": {"Rc", "load_enabled", "RL"},
-    "produces": "Rc_ac",
-    "source": "small_signal",
-    "fn": lambda k: (
-        (getv(k,"Rc") * getv(k,"RL"))/(getv(k,"Rc")+getv(k,"RL"))
-        if bool(getv(k,"load_enabled")) else
-        getv(k,"Rc")
-    )
-    },
+    # Av = -Rc_ac / (re + Re_ac)
+    {"needs": {"Rc_ac", "re", "Re_ac", "is_forward_active"},
+     "produces": "Av",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
+     "source": "small_signal",
+     "tag": "ac",
+     "fn": lambda k: -getv(k, "Rc_ac") /
+                     (getv(k, "re") + getv(k, "Re_ac"))},
 
-    {
-    "needs": {"Rc_ac", "is_forward_active"},
-    "produces": "Rout",
-    "cond": lambda k: bool(getv(k, "is_forward_active")),
-    "source": "small_signal",
-    "fn": lambda k: getv(k, "Rc_ac"),
-    }
-    
+    # AC peak output
+    {"needs": {"ac_in", "Av", "is_forward_active"},
+     "produces": "Vout_pk",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
+     "source": "ac_peak_calc",
+     "tag": "ac",
+     "fn": lambda k: getv(k, "ac_in") * getv(k, "Av")},
 
+    # Output resistance (AC)
+    {"needs": {"Rc_ac", "is_forward_active"},
+     "produces": "Rout",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
+     "source": "small_signal",
+     "tag": "ac",
+     "fn": lambda k: getv(k, "Rc_ac")},
 ]
 # Solve for Rc_ac from Av_target
-
 
 
 # ------------------------------------------------------------
 # 8) BANDWIDTH / POLES (OPTIONAL) (derived)
 # ------------------------------------------------------------
-
-
 RULES += [
 
     # Miller capacitance
-    {"needs": {"C_mu", "Av_mid", "is_forward_active"}, "produces": "C_miller",
+    {"needs": {"C_mu", "Av_mid", "is_forward_active"},
+     "produces": "C_miller",
      "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "bandwidth",
-     "fn": lambda k: getv(k, "C_mu") * (1.0 - getv(k, "Av_mid"))},
+     "tag": "ac",
+     "fn": lambda k: getv(k, "C_mu") *
+                     (1.0 - getv(k, "Av_mid"))},
 
     # Total input HF capacitance
-    {"needs": {"C_pi", "C_miller", "C_stray_in"}, "produces": "C_in_hf",
+    {"needs": {"C_pi", "C_miller", "C_stray_in", "is_forward_active"},
+     "produces": "C_in_hf",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "bandwidth",
-     "fn": lambda k: getv(k, "C_pi") + getv(k, "C_miller") + getv(k, "C_stray_in")},
+     "tag": "ac",
+     "fn": lambda k: getv(k, "C_pi") +
+                     getv(k, "C_miller") +
+                     getv(k, "C_stray_in")},
 
     # Input HF pole
-    {"needs": {"Rin_total", "C_in_hf"}, "produces": "wH_in",
-     "cond": lambda k: getv(k, "C_in_hf") > 0,
+    {"needs": {"Rin_total", "C_in_hf", "is_forward_active"},
+     "produces": "wH_in",
+     "cond": lambda k: bool(getv(k, "is_forward_active")) and getv(k, "C_in_hf") > 0,
      "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: 1.0 / (getv(k, "Rin_total") * getv(k, "C_in_hf"))},
 
-    {"needs": {"wH_in"}, "produces": "fH_in",
+    {"needs": {"wH_in", "is_forward_active"},
+     "produces": "fH_in",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: getv(k, "wH_in") / (2.0 * math.pi)},
 
-
     # Output HF capacitance
-    {"needs": {"C_mu", "C_stray_out"}, "produces": "C_out_hf",
+    {"needs": {"C_mu", "C_stray_out", "is_forward_active"},
+     "produces": "C_out_hf",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: getv(k, "C_mu") + getv(k, "C_stray_out")},
 
     # Output HF pole
-    {"needs": {"Rc_ac", "C_out_hf"}, "produces": "wH_out",
-     "cond": lambda k: getv(k, "C_out_hf") > 0,
+    {"needs": {"Rc_ac", "C_out_hf", "is_forward_active"},
+     "produces": "wH_out",
+     "cond": lambda k: bool(getv(k, "is_forward_active")) and getv(k, "C_out_hf") > 0,
      "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: 1.0 / (getv(k, "Rc_ac") * getv(k, "C_out_hf"))},
 
-    {"needs": {"wH_out"}, "produces": "fH_out",
+    {"needs": {"wH_out", "is_forward_active"},
+     "produces": "fH_out",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: getv(k, "wH_out") / (2.0 * math.pi)},
 
-
     # Overall high-frequency cutoff
-    {"needs": {"fH_in", "fH_out"}, "produces": "fH",
+    {"needs": {"fH_in", "fH_out", "is_forward_active"},
+     "produces": "fH",
+     "cond": lambda k: bool(getv(k, "is_forward_active")),
      "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: min(getv(k, "fH_in"), getv(k, "fH_out"))},
 ]
 
 # ------------------------------------------------------------
-# LOW-FREQUENCY BANDWIDTH (coupling caps)
+# LOW-FREQUENCY BANDWIDTH (coupling caps) (AC)
 # ------------------------------------------------------------
 
 RULES += [
@@ -484,44 +626,238 @@ RULES += [
     # Input coupling pole
     {"needs": {"Rin_total", "C_in_couple"}, "produces": "wL_in",
      "cond": lambda k: getv(k, "C_in_couple") > 0,
-     "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: 1.0 / (getv(k, "Rin_total") * getv(k, "C_in_couple"))},
 
     {"needs": {"wL_in"}, "produces": "fL_in",
-     "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: getv(k, "wL_in") / (2.0 * math.pi)},
-
 
     # Output coupling pole
     {"needs": {"Rc_ac", "C_out_couple"}, "produces": "wL_out",
      "cond": lambda k: getv(k, "C_out_couple") > 0,
-     "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: 1.0 / (getv(k, "Rc_ac") * getv(k, "C_out_couple"))},
 
     {"needs": {"wL_out"}, "produces": "fL_out",
-     "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: getv(k, "wL_out") / (2.0 * math.pi)},
-
 
     # Overall low-frequency cutoff
     {"needs": {"fL_in", "fL_out"}, "produces": "fL",
-     "source": "bandwidth",
+     "tag": "ac",
      "fn": lambda k: max(getv(k, "fL_in"), getv(k, "fL_out"))},
 ]
 
 # ============================================================
+# OSCILLATOR RULES (Colpitts)
+# ============================================================
+import math
+
+RULES += [
+
+    # --- Compute C2 from C1 and feedback_ratio ---
+    {
+        "needs": {"C1", "feedback_ratio"},
+        "produces": "C2",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"C2") is None 
+                          and getv(k,"C1") not in (None,0)
+                          and getv(k,"feedback_ratio") not in (None,0),
+        "fn": lambda k: getv(k,"C1") / getv(k,"feedback_ratio")
+    },
+
+    # --- Compute C1 from C2 and feedback_ratio ---
+    {
+        "needs": {"C2", "feedback_ratio"},
+        "produces": "C1",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"C1") is None 
+                          and getv(k,"C2") not in (None,0)
+                          and getv(k,"feedback_ratio") not in (None,0),
+        "fn": lambda k: getv(k,"C2") * getv(k,"feedback_ratio")
+    },
+
+    # --- Equivalent capacitance of series C1-C2 ---
+    {
+        "needs": {"C1", "C2"},
+        "produces": "Ceq",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"Ceq") is None 
+                          and getv(k,"C1") not in (None,0) 
+                          and getv(k,"C2") not in (None,0),
+        "fn": lambda k: (getv(k,"C1") * getv(k,"C2")) / (getv(k,"C1") + getv(k,"C2"))
+    },
+
+    # --- Resonant frequency from freq input ---
+    {
+        "needs": {"freq"},
+        "produces": "w0",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"w0") is None 
+                          and getv(k,"freq") not in (None,0),
+        "fn": lambda k: 2.0 * math.pi * getv(k,"freq")
+    },
+
+    # --- Resonant frequency from L and Ceq (only if w0 not already defined) ---
+    {
+        "needs": {"L", "Ceq"},
+        "produces": "w0",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"w0") is None
+                          and getv(k,"L") not in (None,0)
+                          and getv(k,"Ceq") not in (None,0),
+        "fn": lambda k: 1.0 / math.sqrt(getv(k,"L") * getv(k,"Ceq"))
+    },
+
+    # --- Frequency in Hz from w0 ---
+    {
+        "needs": {"w0"},
+        "produces": "freq",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"freq") is None and getv(k,"w0") not in (None,0),
+        "fn": lambda k: getv(k,"w0") / (2.0 * math.pi)
+    },
+
+    # Ceq from freq + L
+    {
+        "needs": {"freq", "L"},
+        "produces": "Ceq",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"Ceq") is None 
+                        and getv(k,"freq") not in (None,0)
+                        and getv(k,"L") not in (None,0),
+        "fn": lambda k: 1.0 / ((2 * math.pi * getv(k,"freq"))**2 * getv(k,"L"))
+    },
+
+        # C2 from Ceq + feedback_ratio
+    {
+        "needs": {"Ceq", "feedback_ratio"},
+        "produces": "C2",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"C2") is None 
+                        and getv(k,"Ceq") not in (None,0) 
+                        and getv(k,"feedback_ratio") not in (None,0),
+        "fn": lambda k: getv(k,"Ceq") * (1 + getv(k,"feedback_ratio")) / getv(k,"feedback_ratio")
+    },
+
+    # C1 from C2 + feedback_ratio
+    {
+        "needs": {"C2", "feedback_ratio"},
+        "produces": "C1",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"C1") is None 
+                        and getv(k,"C2") not in (None,0) 
+                        and getv(k,"feedback_ratio") not in (None,0),
+        "fn": lambda k: getv(k,"C2") * getv(k,"feedback_ratio")
+    },
+
+    # --- Compute L from freq + C1/C2 ---
+    {
+        "needs": {"Ceq", "freq"},
+        "produces": "L",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"L") is None 
+                          and getv(k,"Ceq") not in (None,0)
+                          and getv(k,"freq") not in (None,0),
+        "fn": lambda k: 1.0 / ((2*math.pi*getv(k,"freq"))**2 * getv(k,"Ceq"))
+    },
+
+    # --- Compute feedback_ratio from C1/C2 if not given ---
+    {
+        "needs": {"C1","C2"},
+        "produces": "feedback_ratio",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"feedback_ratio") is None
+                          and getv(k,"C1") not in (None,0) 
+                          and getv(k,"C2") not in (None,0),
+        "fn": lambda k: getv(k,"C1") / getv(k,"C2")
+    },
+
+    # --- Compute Barkhauhen Criterion ---
+    {
+        "needs": {"C1","C2"},
+        "produces": "barkhausen_B",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"barkhausen_B") is None,                                      
+        "fn": lambda k: getv(k,"C2") / (getv(k,"C1") + getv(k,"C2")),
+    },
+    {
+        "needs": {"barkhausen_B","Av"},
+        "produces": "barkhausen",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"barkhausen") is None,                                      
+        "fn": lambda k: abs(getv(k,"Av")) * getv(k,"barkhausen_B"),
+    },
+
+    # --- Tank impedance Ztank ---
+    {
+        "needs": {"Q_tank","w0","L"},
+        "produces": "Ztank",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"Ztank") is None
+        and all(getv(k,x) not in (None,0) for x in ("Q_tank","w0","L")),
+        "fn": lambda k: getv(k,"Q_tank") * getv(k,"w0") * getv(k,"L")
+    },
+
+    # --- Oscillator gain ---
+    {
+        "needs": {"gm","Ztank","is_forward_active"},
+        "produces": "Av",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"Av") is None 
+                          and all(getv(k,x) not in (None,0) for x in ("gm","Ztank"))
+                          and bool(getv(k,"is_forward_active")),
+        "fn": lambda k: (getv(k,"gm") * getv(k,"Ztank")) /(1 + getv(k,"gm") * getv(k,"Re"))
+    },
+
+    # --- Loop gain ---
+    {
+        "needs": {"Av","feedback_ratio"},
+        "produces": "loop_gain",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"loop_gain") is None 
+                          and all(getv(k,x) not in (None,0) for x in ("Av_osc","feedback_ratio")),
+        "fn": lambda k: abs(getv(k,"Av_osc")) * getv(k,"feedback_ratio")
+    },
+
+    # --- Will oscillate? ---
+    {
+        "needs": {"loop_gain"},
+        "produces": "will_oscillate",
+        "tags": {"oscillator"},
+        "cond": lambda k: getv(k,"will_oscillate") is None 
+                          and getv(k,"loop_gain") not in (None,0),
+        "fn": lambda k: getv(k,"loop_gain") >= 1.0
+    },
+
+
+]
+# ============================================================
 # REPORTING FUNCTIONS
 # ============================================================
-
 def fmt(v, unit=""):
     if v is None:
         return "—"
-    if abs(v) < 1e-12 and v != 0:
+    abs_v = abs(v)
+    if unit == "" or unit is None:
+        return f"{v:.3f}"
+    # Very small values
+    if abs_v != 0 and abs_v < 1e-12:
         return f"{v:.3e} {unit}".strip()
-    if abs(v) < 1e-3 and v != 0:
+    # Pico
+    if abs_v < 1e-9:
+        return f"{v*1e12:.2f} p{unit}"
+    # Nano
+    if abs_v < 1e-6:
+        return f"{v*1e9:.2f} n{unit}"
+    # Micro
+    if abs_v < 1e-3:
         return f"{v*1e6:.2f} µ{unit}"
-    if abs(v) < 1:
+    # Milli
+    if abs_v < 1:
         return f"{v*1e3:.3f} m{unit}"
+    # Base unit
     return f"{v:.3f} {unit}"
 
 
@@ -530,14 +866,15 @@ def print_resistor_block(name, value, series):
     print(f"{name:<8}: {fmt(value,'Ω')}  → ", end="")
     print(", ".join(f"{r:.0f}Ω ({(r-value)/value:+.1%})" for r in choices))
 
-
 def print_report(k, series=E24_VALUES):
-    # allow passing meta-known
     def vv(key):
         return getv(k, key)
 
     print("\n================ CIRCUIT REPORT ================")
 
+    # -------------------------
+    # CONSTANTS
+    # -------------------------
     print("\n[ CONSTANTS ]")
     for key, unit in (
         ("Vdd", "V"),
@@ -557,6 +894,9 @@ def print_report(k, series=E24_VALUES):
             else:
                 print(f"{key:<12}: {fmt(val, unit)}")
 
+    # -------------------------
+    # BASE
+    # -------------------------
     print("\n[ BASE ]")
     for key, unit in (("Vb", "V"), ("Vb_loaded", "V"), ("Ib", "A"), ("Vbc", "V"), ("Vth", "V")):
         if key in k:
@@ -565,6 +905,9 @@ def print_report(k, series=E24_VALUES):
         if r in k:
             print_resistor_block(r, vv(r), series)
 
+    # -------------------------
+    # EMITTER
+    # -------------------------
     print("\n[ EMITTER ]")
     for key, unit in (("Ve", "V"), ("Ie", "A")):
         if key in k:
@@ -574,6 +917,9 @@ def print_report(k, series=E24_VALUES):
     if "Re_ac" in k:
         print(f"{'Re_ac':<12}: {fmt(vv('Re_ac'), 'Ω')}")
 
+    # -------------------------
+    # COLLECTOR
+    # -------------------------
     print("\n[ COLLECTOR ]")
     for key, unit in (("Vc", "V"), ("Vce", "V"), ("Ic", "A")):
         if key in k:
@@ -582,35 +928,25 @@ def print_report(k, series=E24_VALUES):
         print_resistor_block("Rc", vv("Rc"), series)
     if "RL" in k:
         print_resistor_block("RL", getv(k, "RL"), series)
-
     if "Rc_ac" in k:
         if k.get("load_enabled", False):
-            print(
-                f"{'Rc_ac':<12}: {fmt(getv(k, 'Rc_ac'), 'Ω')}  "
-                f"(= Rc, load disabled)"
-            )
+            print(f"{'Rc_ac':<12}: {fmt(getv(k, 'Rc_ac'), 'Ω')}  (= Rc, load disabled)")
         else:
-            print(
-                f"{'Rc_ac':<12}: {fmt(getv(k, 'Rc_ac'), 'Ω')}  "
-                f"(= Rc || RL)"
-            )
+            print(f"{'Rc_ac':<12}: {fmt(getv(k, 'Rc_ac'), 'Ω')}  (= Rc || RL)")
 
-
+    # -------------------------
+    # REGION
+    # -------------------------
     print("\n[ REGION ]")
-
-    for key in (
-        "is_cutoff",
-        "is_saturation",
-        "is_reverse_active",
-        "is_forward_active",
-    ):
+    for key in ("is_cutoff", "is_saturation", "is_reverse_active", "is_forward_active"):
         if key in k:
             print(f"{key:<20}: {vv(key)}")
-
     if "region" in k:
         print(f"{'region':<20}: {vv('region')}")
 
-
+    # -------------------------
+    # SMALL SIGNAL
+    # -------------------------
     print("\n[ SMALL SIGNAL ]")
     if "is_forward_active" in k and not vv("is_forward_active"):
         print("Small-signal model not valid (not in forward-active region).")
@@ -626,66 +962,56 @@ def print_report(k, series=E24_VALUES):
             if key in k:
                 print(f"{key:<12}: {fmt(vv(key), unit)}")
 
+    # -------------------------
+    # BANDWIDTH
+    # -------------------------
     print("\n[ BANDWIDTH ]")
+    lf_keys = (
+        ("fL_in", "Hz"),
+        ("fL_out", "Hz"),
+        ("fL", "Hz"),
+        ("C_in_couple", "F"),
+        ("C_out_couple", "F"),
+        ("C_e_bypass", "F"),
+    )
+    hf_keys = (
+        ("fH_in", "Hz"),
+        ("fH_out", "Hz"),
+        ("fH", "Hz"),
+        ("C_pi", "F"),
+        ("C_mu", "F"),
+        ("C_miller", "F"),
+        ("C_in_hf", "F"),
+        ("C_out_hf", "F"),
+    )
 
-    if "is_forward_active" in k and not vv("is_forward_active"):
-        print("Bandwidth model not valid (not in forward-active region).")
+    any_bw = False
+    # Low-frequency
+    lf_printed = False
+    for key, unit in lf_keys:
+        if key in k:
+            if not lf_printed:
+                print("\n  Low-Frequency Poles:")
+                lf_printed = True
+            any_bw = True
+            print(f"  {key:<14}: {fmt(vv(key), unit)}")
+    # High-frequency
+    hf_printed = False
+    for key, unit in hf_keys:
+        if key in k:
+            if not hf_printed:
+                print("\n  High-Frequency Poles:")
+                hf_printed = True
+            any_bw = True
+            print(f"  {key:<14}: {fmt(vv(key), unit)}")
+    if not any_bw:
+        print("No capacitances provided.")
+        print("Provide C_in_couple / C_out_couple for low-frequency poles.")
+        print("Provide C_pi / C_mu for high-frequency poles.")
 
-    else:
-        any_bw = False
-
-        # -------------------------
-        # LOW-FREQUENCY SECTION
-        # -------------------------
-        lf_keys = (
-            ("fL_in", "Hz"),
-            ("fL_out", "Hz"),
-            ("fL", "Hz"),
-            ("C_in_couple", "F"),
-            ("C_out_couple", "F"),
-            ("C_e_bypass", "F"),
-        )
-
-        lf_printed = False
-        for key, unit in lf_keys:
-            if key in k:
-                if not lf_printed:
-                    print("\n  Low-Frequency Poles:")
-                    lf_printed = True
-                any_bw = True
-                print(f"  {key:<14}: {fmt(vv(key), unit)}")
-
-        # -------------------------
-        # HIGH-FREQUENCY SECTION
-        # -------------------------
-        hf_keys = (
-            ("fH_in", "Hz"),
-            ("fH_out", "Hz"),
-            ("fH", "Hz"),
-            ("C_pi", "F"),
-            ("C_mu", "F"),
-            ("C_miller", "F"),
-            ("C_in_hf", "F"),
-            ("C_out_hf", "F"),
-        )
-
-        hf_printed = False
-        for key, unit in hf_keys:
-            if key in k:
-                if not hf_printed:
-                    print("\n  High-Frequency Poles:")
-                    hf_printed = True
-                any_bw = True
-                print(f"  {key:<14}: {fmt(vv(key), unit)}")
-
-        # -------------------------
-        # Fallback
-        # -------------------------
-        if not any_bw:
-            print("No capacitances provided.")
-            print("Provide C_in_couple / C_out_couple for low-frequency poles.")
-            print("Provide C_pi / C_mu for high-frequency poles.")
-
+    # -------------------------
+    # OUTPUT SWING
+    # -------------------------
     print("\n[ OUTPUT SWING ]")
     for key, unit in (
         ("Vout_pk", "V"),
@@ -697,18 +1023,46 @@ def print_report(k, series=E24_VALUES):
     ):
         if key in k:
             print(f"{key:<14}: {fmt(vv(key), unit)}")
-
     if "ac_in" in k:
         print(f"{'ac_in':<14}: {fmt(vv('ac_in'), 'V')}")
-        if "clips_low" in k:
-            print(f"{'clips_low':<14}: {vv('clips_low')}")
-        if "clips_high" in k:
-            print(f"{'clips_high':<14}: {vv('clips_high')}")
-        if "clips" in k:
-            print(f"{'clips':<14}: {vv('clips')}")
-            if vv("clips"):
-                print("⚠️  Output will clip.")
+        for clip in ("clips_low", "clips_high", "clips"):
+            if clip in k:
+                print(f"{clip:<14}: {vv(clip)}")
+                if clip == "clips" and vv(clip):
+                    print("⚠️  Output will clip.")
 
+    # -------------------------
+    # OSCILLATOR
+    # -------------------------
+    print("\n[ OSCILLATOR ]")
+    osc_keys = (
+        ("C1", "F"),
+        ("C2", "F"),
+        ("Ceq", "F"),
+        ("L", "H"),
+        ("freq", "Hz"),
+        ("w0", "rad/s"),
+        ("feedback_ratio", ""),
+        ("Q_tank", ""),
+        ("Ztank", "Ω"),
+        ("gm_osc", "S"),
+        ("Av", "V/V"),
+        ("loop_gain", ""),
+        ("will_oscillate", ""),
+        ("barkhausen_B", ""),
+        ("barkhausen", ""),
+    )
+    any_osc = False
+    for key, unit in osc_keys:
+        if key in k:
+            any_osc = True
+            val = vv(key)
+            if isinstance(val, bool):
+                print(f"{key:<14}: {val}")
+            else:
+                print(f"{key:<14}: {fmt(val, unit)}")
+    if not any_osc:
+        print("No oscillator parameters computed or provided.")
 
 # ============================================================
 # DESIGN FUNCTIONS

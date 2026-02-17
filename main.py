@@ -12,16 +12,18 @@ from BJTCalculator import (
 )
 ## ----AMPLIFIER STAGE ----
 raw_known = {
+    # These are the available user inputs. Set to None if unknown, or set to a value to fix it.
     "Vdd": 12,
     "Vbe": 0.6,
-    "Vc" : 6.0,
     "Vce_min": 0.2,
-    "Ic": 1e-3,
+    "Vc": 6.0,
     "beta": 100,
     "divider_ratio": 10.0,
-    "ac_in": 10e-6,
+    "ac_in": 10e-6, # 10 µV RF input signal, rides on top of DC bias
     "Re": 1000, # emitter resistor (Ω)
-    # small-signal constants
+    "Rc": 9000, # collector resistor (Ω)
+
+    # ---- SMALL-SIGNAL PARAMETERS ----
     "Vt": 0.02585,
     "I_cutoff": 1e-6,
     
@@ -51,7 +53,8 @@ print({k: getv(known, k) for k in known})
 
 check_overconstrained(known, DEPENDENCY_LOOPS)
 
-known = solve(known, RULES)
+AMP_TAGS = {"dc", "ac", "amp"}
+known = solve(known, RULES, tags=AMP_TAGS)
 
 print("\nFinal known:")
 print({k: getv(known, k) for k in known})
@@ -90,3 +93,61 @@ for k, v in buffer1.items():
     else:
         unit = "Ω"
     print(f"{k:<12}: {fmt(v, unit)}")
+
+
+# Colpitts Oscillator design
+
+## ----OSCILLATOR STAGE (COLPITTS) ----
+
+raw_known_osc = {
+    # Power supply
+    "Vdd": 12,
+    "beta": 100,
+    
+    # Transistor bias (similar to amplifier, if using BJT)
+    "Vbe": 0.6,
+    "Vb" : 1.6,    # base voltage (V)
+    "Vce_min": 0.2,
+    "Vc": 11.999999,
+    "feedback_ratio": 1,  # C1 / C2 ratio for Colpitts feedback network
+
+    # Bias divider / resistors (user can set knowns)
+    "divider_ratio": 10.0,
+    "Ie": 1e-3,    # emitter resistor (Ω)
+    "Ve": 1.0,    # emitter voltage (V)
+    "Rc": 1,    # collector resistor (Ω)
+    "Rc_bypassed": True,  # set True to bypass Rc (VDD = Vc)
+    "is_forward_active": True, # set False to force cutoff/saturation bias (for testing)
+    
+
+    # Oscillator-specific components
+    # feedback capacitor 1 (F)
+    "L": 10e-6,
+    "Q_tank": 10,
+    "gm": 25.79e-3,
+    "freq": 7e6, #target oscillation frequency (Hz)
+    
+    # Optional small-signal parameters if needed for oscillator DC calc
+    "Vt": 0.02585,
+    "I_cutoff": 1e-30,
+    # Placeholders for calculated parameters
+
+}
+
+# Normalize user inputs
+known_osc = normalize_user_known(raw_known_osc)
+
+print("Initial known (oscillator, user-fixed):")
+print({k: getv(known_osc, k) for k in known_osc})
+
+check_overconstrained(known_osc, DEPENDENCY_LOOPS)
+
+# Solve using only dc and osc tagged rules
+OSC_TAGS = {"dc", "oscillator"}
+known_osc = solve(known_osc, RULES, tags=OSC_TAGS)
+
+print("\nFinal known (oscillator):")
+print({k: getv(known_osc, k) for k in known_osc})
+
+print("\nOscillator design report:")
+print_report(known_osc)
